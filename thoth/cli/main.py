@@ -138,7 +138,11 @@ def daemon(ctx, window, tick, stop, status_, dashboard, dashboard_port):
     try:
         d.run_forever()
     finally:
-        _clear_pid()
+        # Clear only OUR pidfile — a dying instance that lost the single-
+        # instance race must not unlink the live daemon's pidfile, or
+        # status/--stop go blind while the node keeps running.
+        if _read_pid() == os.getpid():
+            _clear_pid()
 
 
 @main.command()

@@ -240,6 +240,12 @@ class BrainWSClient:
                 sender.cancel()
                 try:
                     await sender
+                except asyncio.CancelledError:
+                    # Expected — the drain task was just cancelled. Must
+                    # be caught here: it's a BaseException, and letting it
+                    # propagate would kill the whole reconnect loop after
+                    # the first socket drop (the always-offline bug).
+                    pass
                 except Exception:
                     pass
 
