@@ -79,6 +79,9 @@ class ThothDaemon:
 
         self._device = None
         self._streams: Dict[str, Any] = {}
+        # Streams opened on demand for a user-initiated consumer (capture,
+        # calibration) — closed as soon as no active capture needs them.
+        self._on_demand: set = set()
         self._sync = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -200,12 +203,22 @@ class ThothDaemon:
         cam.setdefault("burst_s", 0.5)
         return cfgs
 
-    def _sensor_enabled(self, sensor) -> bool:
+    # Modalities that are OFF until the user asks for them — the camera
+    # duty-cycles its privacy LED and is exactly the kind of sensor that
+    # must never run ambiently. Opt in three ways: ``sensors.enabled``
+    # allowlist entry, ``sensors.<adapter>.enabled: true``, or an
+    # explicit user-initiated request (capture/calibration start —
+    # ``explicit=True``).
+    _SENSITIVE_MODALITIES = {"camera", "video"}
+    _SENSITIVE_ADAPTERS = {"opencv-camera", "camera", "webcam"}
+
+    def _sensor_enabled(self, sensor, *, explicit: bool = False) -> bool:
         """Permission gate — whether this node may sample the sensor at
         all (privacy: camera/mic exclusion happens BEFORE the device is
         opened, not just hidden from the API). Config:
         ``sensors.enabled``  — allowlist (non-empty → only these),
-        ``sensors.disabled`` — blocklist; both match sensor id, modality
+        ``sensors.disabled`` — blocklist (always wins, even over an
+        explicit request); both match sensor id, modality
         (camera/audio/radar/…) or adapter name."""
         sens = self.config.get("sensors") or {}
         if not isinstance(sens, dict):
@@ -213,11 +226,18 @@ class ThothDaemon:
         tokens = {getattr(sensor, "id", None),
                   getattr(sensor, "type", None),
                   getattr(sensor, "adapter", None)} - {None, ""}
+        disabled = set(sens.get("disabled") or [])
+        if tokens & disabled:
+            return False
         enabled = set(sens.get("enabled") or [])
         if enabled:
             return bool(tokens & enabled)
-        disabled = set(sens.get("disabled") or [])
-        return not (tokens & disabled)
+        if tokens & (self._SENSITIVE_MODALITIES | self._SENSITIVE_ADAPTERS):
+            cfg = sens.get(getattr(sensor, "adapter", "") or "")
+            if isinstance(cfg, dict) and cfg.get("enabled"):
+                return True
+            return explicit
+        return True
 
     def _open_streams(self) -> None:
         from whispy.streams import SampleStream
@@ -236,6 +256,81 @@ class ThothDaemon:
                 self._streams[sensor.id] = stream
             except Exception as exc:
                 logger.warning("sensor %s failed to open: %s", sensor.id, exc)
+
+    def ensure_streams(self, sensor_ids=None) -> List[str]:
+        """Open streams for a user-initiated consumer (capture,
+        calibration). The request itself IS the consent for deny-by-
+        default modalities like the camera — ``explicit=True`` grants
+        them; ``sensors.disabled`` still wins. Streams opened here are
+        tracked in ``_on_demand`` and closed once no active capture
+        references them. Returns the available stream ids."""
+        from whispy.streams import SampleStream
+        want = set(sensor_ids or [])
+        for sensor in self._device.sensors():
+            toks = {getattr(sensor, "id", None),
+                    getattr(sensor, "name", None),
+                    getattr(sensor, "type", None),
+                    getattr(sensor, "adapter", None)} - {None, ""}
+            if want and not (toks & want):
+                continue
+            if sensor.id in self._streams:
+                continue
+            if not self._sensor_enabled(sensor, explicit=True):
+                continue
+            try:
+                handle = self._device.sensor(sensor.id)
+                stream = SampleStream(handle.stream, maxlen=4096,
+                                      name=sensor.id)
+                stream.start()
+                self._streams[sensor.id] = stream
+                self._on_demand.add(sensor.id)
+                logger.info("sensor %s opened on demand (user request)",
+                            sensor.id)
+            except Exception as exc:
+                logger.warning("on-demand sensor %s failed to open: %s",
+                               sensor.id, exc)
+        return sorted(self._streams)
+
+    # -- calibrations ---------------------------------------------------------
+    def build_calibration(self, label: str,
+                          capture_id: str) -> Optional[Dict[str, Any]]:
+        """Per-sensor descriptor stats over a finished capture, saved
+        under ``~/.thoth/calibration/<label>.json`` and pushed to Brain
+        so context/chat agents get a measured baseline for the label."""
+        from ..calibration import (build_from_capture, save as _save_cal)
+        rec = self.captures.get(capture_id)
+        if rec is None:
+            return None
+        cap_dir = self.captures._dir(capture_id)
+        doc = build_from_capture(cap_dir, rec, label)
+        _save_cal(doc)
+        self._push_calibration(doc)
+        return doc
+
+    def _push_calibration(self, doc: Dict[str, Any]) -> None:
+        """Detached upload to Brain — best-effort, never stalls callers."""
+        brain = (self.config.get("brain_url") or "").rstrip("/")
+        token = self.config.get("device_token")
+        if not brain or not token:
+            return
+
+        def _go() -> None:
+            try:
+                import json as _json
+                import urllib.parse
+                import urllib.request
+                label = str(doc.get("label") or "calibration")
+                req = urllib.request.Request(
+                    f"{brain}/v1/calibrations/{urllib.parse.quote(label)}",
+                    data=_json.dumps({"doc": doc}).encode(),
+                    method="PUT",
+                    headers={"Content-Type": "application/json",
+                             "Authorization": f"Bearer {token}"})
+                urllib.request.urlopen(req, timeout=10).read()
+            except Exception as exc:
+                logger.debug("calibration upload failed: %s", exc)
+        threading.Thread(target=_go, name="thoth-cal-upload",
+                         daemon=True).start()
 
     def _attach_watches(self) -> None:
         """Central-role links to enrolled wearables — subscribe to
@@ -947,6 +1042,19 @@ class ThothDaemon:
                 stream = self._streams.get(sid)
                 if stream:
                     stream.unsubscribe(sub)
+
+        # Close on-demand streams no capture still needs — the camera
+        # LED turns back off as soon as the user stops collecting.
+        in_use = {sid for cap in self.captures._active.values()
+                  for sid in cap["sensors"]}
+        for sid in [s for s in self._on_demand if s not in in_use]:
+            stream = self._streams.pop(sid, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            self._on_demand.discard(sid)
 
         for cap in self.captures._active.values():
             subs = self._cap_subs.setdefault(cap["id"], {})

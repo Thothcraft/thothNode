@@ -263,6 +263,14 @@ class _Handler(BaseHTTPRequestHandler):
             rec = d.captures.get(path[len("/api/captures/"):])
             return self._json(200 if rec else 404,
                             rec or {"error": "no such capture"})
+        if path == "/api/calibrations":
+            from ..calibration import list_calibrations
+            return self._json(200, {"calibrations": list_calibrations()})
+        if path.startswith("/api/calibrations/"):
+            from ..calibration import get as _get_cal
+            doc = _get_cal(path[len("/api/calibrations/"):])
+            return self._json(200 if doc else 404,
+                            doc or {"error": "no such calibration"})
         if path == "/api/automations":
             return self._json(200, {"automations": d.automations.list()})
         if path == "/api/v1/model-catalog":
@@ -432,15 +440,30 @@ class _Handler(BaseHTTPRequestHandler):
         d = self.daemon
         if path == "/api/captures/start":
             try:
+                # Starting a capture is the user's explicit consent —
+                # open requested sensors on demand (incl. deny-by-default
+                # camera) before resolving the capture's sensor list.
+                available = d.ensure_streams(body.get("sensors"))
                 rec = d.captures.start(
                     d.device_id, body.get("sensors"),
-                    available=list(d._streams))
+                    available=available)
             except ValueError as exc:
                 return self._json(422, {"error": str(exc)})
             return self._json(201, rec)
         if path == "/api/captures/stop":
             rec = d.captures.stop(str(body.get("capture_id") or ""))
             return self._json(200, rec or {"error": "no such capture"})
+        if path == "/api/calibrations":
+            # {label, capture_id} — descriptor stats over the capture,
+            # saved locally and uploaded to Brain as a labeled baseline.
+            label = str(body.get("label") or "").strip()
+            capture_id = str(body.get("capture_id") or "").strip()
+            if not label or not capture_id:
+                return self._json(
+                    422, {"error": "label and capture_id are required"})
+            doc = d.build_calibration(label, capture_id)
+            return self._json(201 if doc else 404,
+                            doc or {"error": "no such capture"})
         if path == "/api/models/install":
             rm = d.registry.install(
                 name=body.get("name", "model"),
@@ -622,6 +645,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200 if ok else 404,
                             {"ok": ok, "error": None if ok else
                              "active or missing capture"})
+        if path.startswith("/api/calibrations/"):
+            from ..calibration import delete as _del_cal
+            ok = _del_cal(path[len("/api/calibrations/"):])
+            return self._json(200 if ok else 404, {"ok": ok})
         return self._json(404, {"error": "not found"})
 
 

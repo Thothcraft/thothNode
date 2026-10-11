@@ -288,7 +288,9 @@ class _FakeSensor:
 
 def test_sensor_permission_gate(tmp_home):
     """sensors.enabled/disabled gate sampling BEFORE the device opens —
-    the camera LED (and mic privacy) is a config decision."""
+    the camera LED (and mic privacy) is a config decision. Camera is
+    OFF by default: the LED only lights on explicit opt-in or a
+    user-initiated request."""
     pytest.importorskip("whispy")
     from thoth.daemon import ThothDaemon
 
@@ -297,16 +299,28 @@ def test_sensor_permission_gate(tmp_home):
     rad = _FakeSensor("radar-1", "radar", "mmwhat-radar")
 
     d = ThothDaemon(config=ConfigStore())
-    assert d._sensor_enabled(cam) and d._sensor_enabled(mic)
+    assert not d._sensor_enabled(cam)          # camera denied by default
+    assert d._sensor_enabled(mic)              # non-sensitive still on
+    assert d._sensor_enabled(cam, explicit=True)   # user request = consent
+
+    # Per-adapter opt-in: sensors.opencv-camera.enabled
+    d.config.set("sensors", {"opencv-camera": {"enabled": True}})
+    assert d._sensor_enabled(cam)
+    assert d._sensor_enabled(mic)
 
     d.config.set("sensors", {"disabled": ["camera"]})
     assert not d._sensor_enabled(cam)          # modality block
+    assert not d._sensor_enabled(cam, explicit=True)  # blocklist wins
     assert d._sensor_enabled(mic) and d._sensor_enabled(rad)
 
     d.config.set("sensors", {"enabled": ["radar", "mic-1"]})
     assert not d._sensor_enabled(cam)
     assert d._sensor_enabled(rad)              # modality allow
     assert d._sensor_enabled(mic)              # id allow
+
+    # Allowlist can also opt the camera back in explicitly.
+    d.config.set("sensors", {"enabled": ["camera"]})
+    assert d._sensor_enabled(cam)
 
 
 def test_adapter_configs_camera_duty_default(tmp_home):
