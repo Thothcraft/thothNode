@@ -32,6 +32,10 @@ from .actions import ActionScheduler
 
 logger = logging.getLogger(__name__)
 
+# How long an inflight observation_batch may wait for Brain's
+# persistence ack before its items are re-batched and retried.
+_OBS_BATCH_ACK_TIMEOUT_S = 90.0
+
 
 def _probe_bluetooth() -> bool:
     """Cheap BlueZ presence probe for the capabilities advertisement —
@@ -97,7 +101,9 @@ class ThothDaemon:
         # local ring so the dashboard/API can introspect recent envelopes
         # without touching the spool.
         self._obs_spool = ObservationSpool(config_dir() / "spool")
-        self._obs_inflight: Dict[str, List[str]] = {}
+        # batch_id -> (send_ts, [observation_ids]) — cleared on Brain's
+        # post-commit ack or by the _OBS_BATCH_ACK_TIMEOUT_S expiry.
+        self._obs_inflight: Dict[str, Any] = {}
         self.observations: Deque[Dict[str, Any]] = deque(maxlen=500)
         from ..radio_evidence import RadioEvidenceBridge
         self._radio_evidence = RadioEvidenceBridge(self.device_id)
@@ -607,14 +613,22 @@ class ThothDaemon:
     def _flush_observations(self) -> None:
         """Drain the spool into ``observation_batch`` WS frames.
 
-        Peek-then-ack: items leave the spool only after the socket
-        confirms the send (``_observation_batch_sent``); a failed frame
-        keeps its items pending so reconnect redelivers them — Brain
-        dedupes on observation_id (contract §2).
+        Peek-then-ack: items leave the spool only after Brain confirms
+        it *committed* the batch (``observation_ack`` →
+        ``_observation_batch_sent``); a failed frame or a lost ack keeps
+        items pending so they are re-sent — Brain dedupes on
+        observation_id (contract §2).
         """
         ws = self._brain_ws
         if ws is None or not ws.connected or len(self._obs_spool) == 0:
             return
+        # Expire inflight batches whose commit ack never arrived (older
+        # Brain without observation_ack, or an ack lost while the socket
+        # stayed up) — items stay pending and re-batch below.
+        now = time.time()
+        for bid in [b for b, (ts, _ids) in self._obs_inflight.items()
+                    if now - ts > _OBS_BATCH_ACK_TIMEOUT_S]:
+            self._obs_inflight.pop(bid, None)
         if len(self._obs_inflight) > 16:
             # Outbound queue is saturated — let the drain task catch up.
             return
@@ -622,15 +636,16 @@ class ThothDaemon:
         if not items:
             return
         frame = build_batch(items)
-        self._obs_inflight[frame["id"]] = [
+        self._obs_inflight[frame["id"]] = (now, [
             str(i.get("observation_id")) for i in frame["items"]
-            if i.get("observation_id")]
+            if i.get("observation_id")])
         if not ws.send_frame(frame):
             self._obs_inflight.pop(frame["id"], None)
 
     def _observation_batch_sent(self, batch_id: str) -> None:
-        """WS drain confirmation → ack items out of the spool."""
-        ids = self._obs_inflight.pop(batch_id, None)
+        """Brain persistence ack → clear items out of the spool."""
+        entry = self._obs_inflight.pop(batch_id, None)
+        ids = entry[1] if entry else None
         if ids:
             self._obs_spool.ack(ids)
 

@@ -271,18 +271,25 @@ class BrainWSClient:
                         frame.get("kind") or ftype or "event",
                         frame.get("data") or {})
                 raise
-            # Send confirmed — let the daemon ack the spool.
-            if frame.get("type") == "observation_batch" and \
-                    daemon is not None:
-                try:
-                    daemon._observation_batch_sent(frame.get("id"))
-                except Exception:
-                    pass
+            # NOTE: the spool is NOT acked on send — Brain replies with an
+            # ``observation_ack`` frame only after it commits the batch,
+            # and _on_message routes that to _observation_batch_sent. A
+            # socket write alone proved nothing about persistence; a
+            # disconnect or DB failure after send used to lose the items.
 
     async def _on_message(self, ws, raw: Any) -> None:
         try:
             frame = json.loads(raw)
         except Exception:
+            return
+        if frame.get("type") == "observation_ack":
+            # Brain committed the batch — only now may the spool drop it.
+            daemon = self._daemon
+            if daemon is not None:
+                try:
+                    daemon._observation_batch_sent(frame.get("id"))
+                except Exception:
+                    pass
             return
         if frame.get("type") != "api_request":
             return

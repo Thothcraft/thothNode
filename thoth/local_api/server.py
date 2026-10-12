@@ -428,11 +428,36 @@ class _Handler(BaseHTTPRequestHandler):
                     headers={"Content-Type": "application/json"},
                     method="POST")
                 with _ur.urlopen(req, timeout=15) as resp:
-                    ok = resp.status == 200
+                    creds = json.loads(resp.read() or b"{}")
+                access_token = str(creds.get("access_token") or "")
             except Exception:
-                ok = False
-            if not ok:
+                access_token = ""
+            if not access_token:
                 return self._json(401, {"error": "invalid credentials"})
+            # Ownership gate: a valid Brain account alone must NOT yield
+            # local control — the account must list this node among its
+            # devices, otherwise anyone with any account could reach
+            # node controls and captures.
+            device_id = str(getattr(self.daemon, "device_id", "") or "")
+            if device_id:
+                owned = False
+                try:
+                    req = _ur.Request(
+                        f"{brain}/v1/devices",
+                        headers={"Authorization": f"Bearer {access_token}"})
+                    with _ur.urlopen(req, timeout=15) as resp:
+                        devices = (json.loads(resp.read() or b"{}")
+                                   .get("devices") or [])
+                    owned = any(
+                        isinstance(d, dict) and device_id in (
+                            str(d.get("id") or ""),
+                            str(d.get("stable_uuid") or ""))
+                        for d in devices)
+                except Exception:
+                    owned = False
+                if not owned:
+                    return self._json(
+                        403, {"error": "account does not own this node"})
             return self._json(200, {"token": self.server.token})  # type: ignore[attr-defined]
         if not self._authorized():
             return
