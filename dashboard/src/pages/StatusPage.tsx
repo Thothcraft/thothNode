@@ -7,25 +7,16 @@ const ts = (t?: number) =>
 interface Pred { timestamp?: number; label?: string; confidence?: number; runtime_model_id?: string }
 
 export default function StatusPage() {
-  const [status, setStatus] = useState<any>({})
-  const [device, setDevice] = useState<any>({})
-  const [meta, setMeta] = useState<any>({})
   const [sensors, setSensors] = useState<any[]>([])
   const [actuators, setActuators] = useState<any[]>([])
   const [preds, setPreds] = useState<Pred[]>([])
 
   const refresh = useCallback(async () => {
-    const [s, inf, mt, sn, ac, pr] = await Promise.all([
-      get<any>('/api/status'),
-      get<any>('/api/v1/device'),
-      get<any>('/api/v1/metadata'),
+    const [sn, ac, pr] = await Promise.all([
       get<any>('/api/sensors'),
       get<any>('/api/actuators'),
       get<any>('/api/predictions?limit=12'),
     ])
-    if (s.body) setStatus(s.body)
-    if (inf.body) setDevice(inf.body)
-    if (mt.body) setMeta(mt.body)
     setSensors(sn.body?.sensors ?? [])
     setActuators(ac.body?.actuators ?? [])
     setPreds(pr.body?.predictions ?? [])
@@ -37,31 +28,8 @@ export default function StatusPage() {
     return () => clearInterval(t)
   }, [refresh])
 
-  const inf = meta.inferred ?? {}
   return (
     <>
-      <div className="card">
-        <h3>Device</h3>
-        <b>{device.name || device.device_name || status.device_name || '?'}</b>{' '}
-        <span className="pill">{status.device_id || device.id || '–'}</span>
-        <div className="muted" style={{ marginTop: 6 }}>
-          uptime {Math.round(status.uptime_s || 0)}s ·
-          {' '}{(status.sensors?.length ?? sensors.length)} sensors ·
-          {' '}{status.active_models ?? '–'} active models ·
-          {' '}{status.captures ?? '–'} captures
-        </div>
-        <div className="muted">
-          {inf.location?.city || ''}
-          {inf.location?.postal_code ? ` ${inf.location.postal_code}` : ''}
-          {inf.battery?.percent != null
-            ? ` · battery ${inf.battery.percent}%${inf.battery.charging ? ' ⚡' : ''}`
-            : ''}
-          {inf.application?.foreground
-            ? ` · fg: ${inf.application.foreground}`
-            : ''}
-        </div>
-      </div>
-
       <div className="card">
         <h3>Sensors</h3>
         <table>

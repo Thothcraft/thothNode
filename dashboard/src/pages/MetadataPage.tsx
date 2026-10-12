@@ -4,11 +4,11 @@ import { get, put } from '../api'
 import { RoomScene, roomOptions, roomView } from '../scene'
 import { SpatialSettings } from '../scene/SpatialSettings'
 import { EMPTY_ROOM } from '../scene/types'
-import type { RoomDevice, RoomDoc, RoomFurniture, RoomSpec, V3 } from '../scene'
+import type { RoomDevice, RoomDoc, RoomFurniture, RoomPerson, RoomSpec, V3 } from '../scene'
 
 const ts = (t?: number) => t ? new Date(t * 1000).toLocaleString() : '–'
 
-type Sel = { kind: 'device' | 'furniture'; id: string } | null
+type Sel = { kind: 'device' | 'furniture' | 'person'; id: string } | null
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
@@ -20,7 +20,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 function DragLayer({ room, setSel, onMove, onBegin, onCommit }: {
   room: RoomDoc
   setSel: (s: Sel) => void
-  onMove: (kind: 'device' | 'furniture', id: string, pos: V3) => void
+  onMove: (kind: 'device' | 'furniture' | 'person', id: string, pos: V3) => void
   onBegin: () => void
   onCommit: () => void
 }) {
@@ -95,6 +95,13 @@ function DragLayer({ room, setSel, onMove, onBegin, onCommit }: {
           </mesh>
         )
       })}
+      {(room.persons ?? []).map((person) => (
+        <mesh key={`ph-${person.person_id}`} position={person.pos}
+              onPointerDown={(e) => begin(e, 'person', person.person_id, person.pos)}>
+          <cylinderGeometry args={[0.28, 0.28, 1.8, 12]} />
+          <meshBasicMaterial visible={false} />
+        </mesh>
+      ))}
     </group>
   )
 }
@@ -119,6 +126,8 @@ export default function MetadataPage() {
   const [saved, setSaved] = useState('')
   const [addType, setAddType] = useState('table')
   const [newDevice, setNewDevice] = useState('')
+  const [newPerson, setNewPerson] = useState('')
+  const [knownPeople, setKnownPeople] = useState<any[]>([])
   const [selRoom, setSelRoom] = useState('')
 
   const refresh = useCallback(async () => {
@@ -131,6 +140,11 @@ export default function MetadataPage() {
     if (r.body) {
       setRoom(r.body)
       setSelRoom((prev) => prev || (r.body!.room_id ?? ''))
+    }
+    const c = await get<any>('/api/v1/context')
+    if (c.body) {
+      const synced = c.body.entities?.filter((e: any) => e.kind === 'person') ?? []
+      setKnownPeople(synced.length ? synced : r.body?.persons ?? [])
     }
   }, [])
 
@@ -186,17 +200,24 @@ export default function MetadataPage() {
 
   const selId = sel?.id ?? null
 
-  const findItem = (kind: 'device' | 'furniture', id: string) =>
+  const findItem = (kind: 'device' | 'furniture' | 'person', id: string) =>
     kind === 'device'
       ? room?.devices?.find((d, i) => (d.device_id || `dev-${i}`) === id)
-      : (view?.furniture ?? []).find((f, i) => (f.id ?? `furniture-${i}`) === id)
+      : kind === 'person'
+        ? (view?.persons ?? []).find((p) => p.person_id === id)
+        : (view?.furniture ?? []).find((f, i) => (f.id ?? `furniture-${i}`) === id)
 
-  const onMove = (kind: 'device' | 'furniture', id: string, pos: V3) => {
+  const onMove = (kind: 'device' | 'furniture' | 'person', id: string, pos: V3) => {
     setDragging(true)
     if (kind === 'device') {
       mutate((doc) => {
         const d = doc.devices?.find((x, i) => (x.device_id || `dev-${i}`) === id)
         if (d) d.pos = pos
+      })
+    } else if (kind === 'person') {
+      mutate((doc) => {
+        const person = doc.persons?.find((p) => p.person_id === id)
+        if (person) person.pos = pos
       })
     } else {
       mutateRoom((r) => {
@@ -214,6 +235,8 @@ export default function MetadataPage() {
     ? (findItem('device', sel.id) as RoomDevice | undefined) : undefined
   const selFurn = sel?.kind === 'furniture'
     ? (findItem('furniture', sel.id) as RoomFurniture | undefined) : undefined
+  const selPerson = sel?.kind === 'person'
+    ? (findItem('person', sel.id) as RoomPerson | undefined) : undefined
 
   const inf = meta?.inferred ?? {}
 
@@ -232,6 +255,17 @@ export default function MetadataPage() {
             <input value={manual.room_id}
                    onChange={(e) => setManual({ ...manual, room_id: e.target.value })} /></div>
           <button className="go" onClick={saveManual}>save metadata</button>
+        </div>
+
+        <div className="card">
+          <h3>People</h3>
+          {knownPeople.length === 0
+            ? <p className="muted">No people have synced to the context map yet.</p>
+            : <table><thead><tr><th>person</th><th>context id</th></tr></thead>
+              <tbody>{knownPeople.map((p) => <tr key={p.id}>
+                <td>{p.name || p.id}</td><td className="muted">{p.id}</td>
+              </tr>)}</tbody></table>}
+          <small className="muted">Place a synced person in the selected room, then drag the marker to set their position.</small>
         </div>
 
         <div className="card">
@@ -305,6 +339,26 @@ export default function MetadataPage() {
               setNewDevice('')
             }}>+ device</button>
           </div>
+          <div className="row" style={{ marginTop: 6 }}>
+            <input placeholder="person id" size={12} value={newPerson}
+                   list="known-persons"
+                   onChange={(e) => setNewPerson(e.target.value)} />
+            <datalist id="known-persons">
+              {knownPeople.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </datalist>
+            <button onClick={() => {
+              const id = newPerson.trim()
+              if (!id) return
+              mutate((doc) => {
+                doc.persons = doc.persons ?? []
+                if (!doc.persons.some((p) => p.person_id === id))
+                  doc.persons.push({ person_id: id,
+                    name: knownPeople.find((p) => p.id === id)?.name || id,
+                    pos: [0, 0, 0], room_id: selRoom })
+              })
+              setNewPerson('')
+            }}>+ person placement</button>
+          </div>
           <div className="row" style={{ marginTop: 8 }}>
             <button className="go" onClick={() => room && putRoom(room)}>
               save room</button>
@@ -344,7 +398,9 @@ export default function MetadataPage() {
               kind: p.kind,
               id: p.kind === 'device'
                 ? (p.item as RoomDevice).device_id
-                : ((p.item as RoomFurniture).id ?? ''),
+                : p.kind === 'person'
+                  ? (p.item as RoomPerson).person_id
+                  : ((p.item as RoomFurniture).id ?? ''),
             })}
             overlays={view && (
               <DragLayer room={view} setSel={setSel}
@@ -354,11 +410,11 @@ export default function MetadataPage() {
           />
         )}
 
-        {sel && (selDevice || selFurn) && (
+        {sel && (selDevice || selFurn || selPerson) && (
           <div className="card" style={{
             position: 'absolute', right: 10, top: 46, width: 250,
             background: 'rgba(23,28,38,0.94)' }}>
-            <h3>{sel.kind === 'device' ? 'Device' : 'Furniture'} — {sel.id}</h3>
+            <h3>{sel.kind === 'device' ? 'Device' : sel.kind === 'person' ? 'Person' : 'Furniture'} — {sel.id}</h3>
             {selDevice && (
               <>
                 <div className="field"><span>device id</span>
@@ -431,6 +487,31 @@ export default function MetadataPage() {
                         })
                       } catch { /* leave invalid JSON unsaved */ }
                     }} /></div>
+              </>
+            )}
+            {selPerson && (
+              <>
+                <div className="field"><span>display name</span>
+                  <input value={selPerson.name ?? selPerson.person_id}
+                         onChange={(e) => mutate((d) => {
+                           const p = d.persons?.find((x) => x.person_id === sel.id)
+                           if (p) p.name = e.target.value
+                         })} /></div>
+                <div className="field"><span>room</span>
+                  <select value={selPerson.room_id ?? ''}
+                          onChange={(e) => mutate((d) => {
+                            const p = d.persons?.find((x) => x.person_id === sel.id)
+                            if (p) p.room_id = e.target.value
+                          })}>
+                    {roomOptions(room!).map((r) => <option key={r.room_id || 'primary'} value={r.room_id}>{r.name}</option>)}
+                  </select></div>
+                <div className="field"><span>position (x y z)</span>
+                  <div className="row">{selPerson.pos.map((v, i) => (
+                    <Num key={i} v={v} onChange={(n) => mutate((d) => {
+                      const p = d.persons?.find((x) => x.person_id === sel.id)
+                      if (p) p.pos[i] = n
+                    })} />
+                  ))}</div></div>
               </>
             )}
             {selFurn && (

@@ -3,12 +3,13 @@ import { RoomShell } from './RoomShell'
 import { Furniture } from './Furniture'
 import { DeviceModel } from './DeviceModel'
 import { CsiLinks } from './CsiLinks'
+import { PersonMarker } from './PersonMarker'
 import { EMPTY_ROOM } from './types'
-import type { RoomDevice, RoomDoc, RoomFurniture } from './types'
+import type { RoomDevice, RoomDoc, RoomFurniture, RoomPerson } from './types'
 
 export interface RoomScenePick {
-  kind: 'device' | 'furniture'
-  item: RoomDevice | RoomFurniture
+  kind: 'device' | 'furniture' | 'person'
+  item: RoomDevice | RoomFurniture | RoomPerson
 }
 
 /**
@@ -51,6 +52,9 @@ export function RoomScene({ room, overlays, onPick, selectedId, controls,
             selected={d.device_id === selectedId}
             onPick={onPick ? (dev) => onPick({ kind: 'device', item: dev }) : undefined}
           />
+        ))}
+        {(doc.persons ?? []).map((person) => (
+          <PersonMarker key={person.person_id} person={person} />
         ))}
         <CsiLinks devices={doc.devices} />
         {overlays}

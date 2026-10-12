@@ -68,6 +68,17 @@ export default function ModelsPage() {
   useEffect(() => { refresh() }, [refresh])
 
   const installOne = async (step: { name: string; processor: string; config: any }) => {
+    // Presets are safe to run repeatedly: re-use the installed pipeline step
+    // instead of creating another active copy with a fresh runtime id.
+    const existing = models.find((m) => m.name === step.name
+      && m.processor === step.processor)
+    if (existing) {
+      if (!existing.active)
+        await post('/api/models/activate', {
+          runtime_model_id: existing.runtime_model_id, active: true,
+        })
+      return existing
+    }
     const r = await post<any>('/api/models/install', {
       name: step.name, processor: step.processor, config: step.config,
     })
@@ -147,6 +158,19 @@ export default function ModelsPage() {
 
       <div className="card">
         <h3>Installed</h3>
+        {(() => {
+          const activeGroups = new Map<string, any[]>()
+          for (const model of models.filter((m) => m.active)) {
+            const key = `${model.name}|${model.processor}`
+            activeGroups.set(key, [...(activeGroups.get(key) ?? []), model])
+          }
+          const duplicates = [...activeGroups.entries()].filter(([, group]) => group.length > 1)
+          return duplicates.length > 0 ? (
+            <p className="muted" style={{ color: 'var(--warn)' }}>
+              {duplicates.length} pipeline step{duplicates.length === 1 ? '' : 's'} have multiple active copies. Running a preset again now reuses the installed copy; deactivate any older duplicates below.
+            </p>
+          ) : null
+        })()}
         <table>
           <thead><tr><th>runtime id</th><th>name</th><th>processor</th><th>state</th><th /></tr></thead>
           <tbody>

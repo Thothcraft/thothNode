@@ -72,6 +72,14 @@ export interface RoomDevice {
   sensors?: RoomSensorSpec[]
 }
 
+/** A person marker placed on the shared house plan; position is in room metres. */
+export interface RoomPerson {
+  person_id: string
+  name?: string
+  pos: V3
+  room_id?: string
+}
+
 /** A secondary named room: own geometry + furniture, devices join it via
  * `RoomDevice.room_id`. */
 export interface RoomSpec {
@@ -93,6 +101,7 @@ export interface RoomDoc {
   walls?: RoomWall[]
   furniture?: RoomFurniture[]
   devices?: RoomDevice[]
+  persons?: RoomPerson[]
   /** extra rooms beyond the primary (top-level) one */
   rooms?: RoomSpec[]
   updated_at?: number
@@ -115,10 +124,12 @@ export function roomView(doc: RoomDoc, roomId: string): RoomDoc {
   if (roomId === primary) {
     return { ...doc,
       devices: (doc.devices ?? []).filter(
-        (d) => !d.room_id || d.room_id === primary) }
+        (d) => !d.room_id || d.room_id === primary),
+      persons: (doc.persons ?? []).filter(
+        (p) => !p.room_id || p.room_id === primary) }
   }
   const r = (doc.rooms ?? []).find((x) => x.room_id === roomId)
-  if (!r) return { ...doc, devices: [] }
+  if (!r) return { ...doc, devices: [], persons: [] }
   return {
     ...doc,
     room_id: r.room_id,
@@ -128,6 +139,7 @@ export function roomView(doc: RoomDoc, roomId: string): RoomDoc {
     walls: r.walls ?? [],
     furniture: r.furniture ?? [],
     devices: (doc.devices ?? []).filter((d) => d.room_id === roomId),
+    persons: (doc.persons ?? []).filter((p) => p.room_id === roomId),
   }
 }
 

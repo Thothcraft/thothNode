@@ -30,6 +30,7 @@ DEFAULT_ROOM: Dict[str, Any] = {
     "walls": [],
     "furniture": [],
     "devices": [],
+    "persons": [],
     "updated_at": 0.0,
 }
 
@@ -137,6 +138,20 @@ def normalize_room(doc: Dict[str, Any]) -> Dict[str, Any]:
             "sensors": sensors,
         })
     out["devices"] = devices
+    persons = []
+    for person in doc.get("persons") or []:
+        if not isinstance(person, dict):
+            continue
+        person_id = str(person.get("person_id") or "").strip()
+        if not person_id:
+            continue
+        persons.append({
+            "person_id": person_id,
+            "name": str(person.get("name") or person_id),
+            "pos": _vec3(person.get("pos")),
+            "room_id": str(person.get("room_id") or ""),
+        })
+    out["persons"] = persons
     from .spatial_config import building, spatial, number
     for source, target in [(doc, out)] + list(zip(
             [r for r in doc.get("rooms", []) if isinstance(r, dict)], rooms)):
