@@ -193,6 +193,8 @@ class MetadataManager:
                    "lon": float(geo.get("longitude") or 0.0),
                    "postal_code": str(geo.get("postal_code") or ""),
                    "city": str(geo.get("city") or ""),
+                   "source": "public_ip_geolocation",
+                   "precision": "coarse_egress_area",
                    "updated_at": now}
             if loc != self._inferred["location"]:
                 changed["location"] = loc
