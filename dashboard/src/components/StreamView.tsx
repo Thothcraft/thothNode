@@ -20,6 +20,31 @@ const pcmToFloat = (b64: string): Float32Array => {
   return out
 }
 
+/** Whispy radar view maps are four little-endian float16 24×24 grids. */
+function decodeRadarViews(b64?: string, shape?: number[]): number[][][] {
+  if (!b64 || !shape || shape.length !== 3
+      || shape[0] !== 4 || shape[1] !== 24 || shape[2] !== 24) return []
+  try {
+    const bytes = b64ToBytes(b64)
+    if (bytes.length !== 4 * 24 * 24 * 2) return []
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const half = (h: number) => {
+      const sign = h & 0x8000 ? -1 : 1
+      const exponent = (h >> 10) & 0x1f
+      const fraction = h & 0x03ff
+      if (exponent === 0) return sign * 2 ** -14 * (fraction / 1024)
+      if (exponent === 0x1f) return fraction ? 0 : sign * Infinity
+      return sign * 2 ** (exponent - 15) * (1 + fraction / 1024)
+    }
+    return Array.from({ length: 4 }, (_, channel) =>
+      Array.from({ length: 24 }, (_, y) =>
+        Array.from({ length: 24 }, (_, x) =>
+          half(view.getUint16(((channel * 24 + y) * 24 + x) * 2, true)))))
+  } catch {
+    return []
+  }
+}
+
 /** Draw a waveform/trace into a canvas (dark theme, accent line). */
 function Trace({
   values, label, height = 90, max,
@@ -216,34 +241,44 @@ export function StreamView({
 
   // ---- radar: 3 views --------------------------------------------------------
   if (t.includes('radar')) {
-    const xy = (last?.payload?.xy_map ?? []) as number[][]
+    const views = decodeRadarViews(
+      last?.payload?.views_b64, last?.payload?.views_shape)
+    const xy = views[3] ?? []
     const previous = samples.length > 1
-      ? (samples[samples.length - 2]?.payload?.xy_map ?? []) as number[][]
+      ? decodeRadarViews(samples[samples.length - 2]?.payload?.views_b64,
+          samples[samples.length - 2]?.payload?.views_shape)[3] ?? []
       : []
     const delta = xy.length && previous.length === xy.length
       ? xy.map((row, y) => row.map((value, x) =>
           Number(value) - Number(previous[y]?.[x] ?? value)))
       : []
-    const prof = (last?.payload?.range_profile ?? []) as number[]
-    const snr = last?.payload?.snr_db
+    const snr = last?.payload?.snr_f
     return (
       <div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          {xy.length > 0 && <Heatmap grid={xy} label="range × azimuth energy" />}
-          {delta.length > 0 && <Heatmap grid={delta} label="change since previous frame" />}
-          <Bars values={prof} label="range profile" height={220} />
-        </div>
+        {views.length === 4 ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <Heatmap grid={views[0]} label="range × Doppler" />
+            <Heatmap grid={views[1]} label="range × azimuth" />
+            <Heatmap grid={views[2]} label="range × elevation" />
+            <Heatmap grid={xy} label="x-y radar map" />
+            {delta.length > 0 &&
+              <Heatmap grid={delta} label="x-y change since previous frame" />}
+          </div>
+        ) : (
+          <div className="muted">
+            DSP radar views are unavailable. Raw ADC amplitude is diagnostic
+            only and cannot confirm room occupancy.
+          </div>
+        )}
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-          SNR {typeof snr === 'number' ? `${snr.toFixed(1)} dB` : '–'} ·{' '}
-          energy {last?.payload?.energy?.toFixed?.(3) ?? '–'} ·{' '}
+          clutter-masked DSP SNR {typeof snr === 'number' ? `${snr.toFixed(1)} dB` : '–'} ·{' '}
+          raw max/median {typeof last?.payload?.snr_db === 'number'
+            ? last.payload.snr_db.toFixed(3) : '–'} (diagnostic only) ·{' '}
           {samples.length} frames
         </div>
         <div style={{ height: 8 }} />
-        <Bars
-          values={samples.slice(-50).map((s) => s.payload?.snr_db ?? 0)}
-          label="SNR history (last 50 frames)"
-          height={60}
-        />
+        <Trace values={samples.slice(-50).map((s) => s.payload?.snr_f ?? 0)}
+          label="clutter-masked DSP SNR history (last 50 frames)" height={60} />
       </div>
     )
   }
