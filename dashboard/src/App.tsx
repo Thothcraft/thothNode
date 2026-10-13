@@ -39,7 +39,7 @@ async function tokenOk(t: string): Promise<'ok' | 'bad' | 'error'> {
    /api/auth/login bridge (Brain-verified server-side). */
 async function loginWithPassword(
   username: string, password: string,
-): Promise<'ok' | 'bad' | 'error' | 'tokenless'> {
+): Promise<'ok' | 'bad' | 'error' | 'tokenless' | 'not-owned' | 'limited'> {
   try {
     const r = await fetch('/api/auth/login', {
       method: 'POST',
@@ -47,6 +47,8 @@ async function loginWithPassword(
       body: JSON.stringify({ username, password }),
     })
     if (r.status === 401) return 'bad'
+    if (r.status === 403) return 'not-owned'
+    if (r.status === 429) return 'limited'
     if (!r.ok) return 'error'
     const data = await r.json().catch(() => ({}))
     if (data.token) {
@@ -74,7 +76,9 @@ function SignIn({ onUnlock }: { onUnlock: (t: string) => Promise<void> }) {
       if (t) { location.reload(); return }
       setErr('signed in but no token returned')
     } else if (r === 'bad') setErr('invalid username or password')
-    else setErr('sign-in failed — node may be offline from Brain')
+    else if (r === 'not-owned') setErr('this account is not paired with this device')
+    else if (r === 'limited') setErr('too many login attempts; try again later')
+    else setErr('sign-in failed — check the node connection to Brain')
     setBusy(false)
   }
 

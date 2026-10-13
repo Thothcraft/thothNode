@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { get } from '../api'
+import { get, post } from '../api'
 import { RoomScene, roomOptions, roomView } from '../scene'
 import type { RoomDevice, RoomDoc } from '../scene'
 import { StreamView, type Sample } from '../components/StreamView'
@@ -195,13 +195,26 @@ export default function LivePage() {
     return () => clearInterval(t)
   }, [tick])
 
-  const toggleStream = useCallback((sid: string) => {
+  const toggleStream = useCallback(async (sid: string) => {
     const streams = streamsRef.current
     if (streams.has(sid)) {
       streams.delete(sid)
+      void post(`/api/sensors/${encodeURIComponent(sid)}/stop`)
     } else {
       const type = sensorsRef.current.find((s) => s.id === sid)?.type ?? ''
-      streams.set(sid, newStream(type))
+      const state = newStream(type)
+      streams.set(sid, state)
+      bump((n) => n + 1)
+      // Sensitive streams such as the camera are opened only after the
+      // user explicitly selects them. Starting a capture is not required
+      // for live preview.
+      const started = await post<{ error?: string }>(
+        `/api/sensors/${encodeURIComponent(sid)}/start`)
+      if (started.status !== 200) {
+        state.err = started.body?.error || 'could not start sensor'
+        bump((n) => n + 1)
+        return
+      }
       void tick()                        // prime immediately, don't wait a tick
     }
     bump((n) => n + 1)
@@ -417,7 +430,9 @@ export default function LivePage() {
                     </strong>
                     {st.err
                       ? <span className="pill err">{st.err}</span>
-                      : <span className="pill live">● live · {st.ema.toFixed(1)}/s</span>}
+                      : st.count > 0
+                        ? <span className="pill live">● live · {st.ema.toFixed(1)}/s</span>
+                        : <span className="pill">waiting for first sample</span>}
                     <span className="muted" style={{ marginLeft: 'auto' }}>
                       {st.count} · last {fmtTs(st.lastTs)}
                     </span>

@@ -217,12 +217,20 @@ export function StreamView({
   // ---- radar: 3 views --------------------------------------------------------
   if (t.includes('radar')) {
     const xy = (last?.payload?.xy_map ?? []) as number[][]
+    const previous = samples.length > 1
+      ? (samples[samples.length - 2]?.payload?.xy_map ?? []) as number[][]
+      : []
+    const delta = xy.length && previous.length === xy.length
+      ? xy.map((row, y) => row.map((value, x) =>
+          Number(value) - Number(previous[y]?.[x] ?? value)))
+      : []
     const prof = (last?.payload?.range_profile ?? []) as number[]
     const snr = last?.payload?.snr_db
     return (
       <div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           {xy.length > 0 && <Heatmap grid={xy} label="range × azimuth energy" />}
+          {delta.length > 0 && <Heatmap grid={delta} label="change since previous frame" />}
           <Bars values={prof} label="range profile" height={220} />
         </div>
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>

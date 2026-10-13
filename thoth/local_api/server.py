@@ -421,6 +421,7 @@ class _Handler(BaseHTTPRequestHandler):
                      or "https://api.thothcraft.com").rstrip("/")
             try:
                 import urllib.request as _ur
+                import urllib.error as _ue
                 req = _ur.Request(
                     f"{brain}/api/token",
                     data=json.dumps(
@@ -430,10 +431,20 @@ class _Handler(BaseHTTPRequestHandler):
                 with _ur.urlopen(req, timeout=15) as resp:
                     creds = json.loads(resp.read() or b"{}")
                 access_token = str(creds.get("access_token") or "")
+                auth_status = 401
+            except _ue.HTTPError as exc:
+                # Preserve an account-login rejection (or rate limit) while
+                # distinguishing it from an unreachable Brain service.
+                auth_status = exc.code if exc.code in (401, 429) else 502
+                access_token = ""
             except Exception:
+                auth_status = 502
                 access_token = ""
             if not access_token:
-                return self._json(401, {"error": "invalid credentials"})
+                message = ("invalid credentials" if auth_status == 401 else
+                           "login service temporarily unavailable" if auth_status == 502 else
+                           "too many login attempts; try again later")
+                return self._json(auth_status, {"error": message})
             # Ownership gate: a valid Brain account alone must NOT yield
             # local control — the account must list this node among its
             # devices, otherwise anyone with any account could reach
@@ -463,6 +474,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         body = self._body()
         d = self.daemon
+        if path.startswith("/api/sensors/") and path.endswith("/start"):
+            sensor_id = path[len("/api/sensors/"):-len("/start")]
+            if not d.start_live_stream(sensor_id):
+                return self._json(422, {"error": "sensor unavailable or disabled"})
+            return self._json(200, {"sensor_id": sensor_id, "started": True})
+        if path.startswith("/api/sensors/") and path.endswith("/stop"):
+            sensor_id = path[len("/api/sensors/"):-len("/stop")]
+            d.stop_live_stream(sensor_id)
+            return self._json(200, {"sensor_id": sensor_id, "stopped": True})
         if path == "/api/captures/start":
             try:
                 # Starting a capture is the user's explicit consent —

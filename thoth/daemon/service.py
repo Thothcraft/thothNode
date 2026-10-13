@@ -83,9 +83,10 @@ class ThothDaemon:
 
         self._device = None
         self._streams: Dict[str, Any] = {}
-        # Streams opened on demand for a user-initiated consumer (capture,
-        # calibration) — closed as soon as no active capture needs them.
+        # Streams opened on demand are retained only while a user preview
+        # or active capture needs them.
         self._on_demand: set = set()
+        self._preview_streams: set = set()
         self._sync = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -296,6 +297,18 @@ class ThothDaemon:
                 logger.warning("on-demand sensor %s failed to open: %s",
                                sensor.id, exc)
         return sorted(self._streams)
+
+    def start_live_stream(self, sensor_id: str) -> bool:
+        """Open a stream for a user-selected live preview."""
+        available = self.ensure_streams([sensor_id])
+        if sensor_id not in available:
+            return False
+        self._preview_streams.add(sensor_id)
+        return True
+
+    def stop_live_stream(self, sensor_id: str) -> None:
+        """Release a preview; active captures may still retain the stream."""
+        self._preview_streams.discard(sensor_id)
 
     # -- calibrations ---------------------------------------------------------
     def build_calibration(self, label: str,
@@ -1060,8 +1073,9 @@ class ThothDaemon:
 
         # Close on-demand streams no capture still needs — the camera
         # LED turns back off as soon as the user stops collecting.
-        in_use = {sid for cap in self.captures._active.values()
-                  for sid in cap["sensors"]}
+        in_use = set(self._preview_streams) | {
+            sid for cap in self.captures._active.values()
+            for sid in cap["sensors"]}
         for sid in [s for s in self._on_demand if s not in in_use]:
             stream = self._streams.pop(sid, None)
             if stream is not None:
