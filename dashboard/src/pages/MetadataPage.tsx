@@ -24,7 +24,7 @@ function DragLayer({ room, setSel, onMove, onBegin, onCommit }: {
   onBegin: () => void
   onCommit: () => void
 }) {
-  const drag = useRef<{ kind: 'device' | 'furniture'; id: string;
+  const drag = useRef<{ kind: 'device' | 'furniture' | 'person'; id: string;
                        off: V3; y: number } | null>(null)
   const W = room.dims.w / 2
   const D = room.dims.d / 2
@@ -37,7 +37,7 @@ function DragLayer({ room, setSel, onMove, onBegin, onCommit }: {
     return () => window.removeEventListener('pointerup', up)
   }, [onCommit])
 
-  const begin = (e: ThreeEvent<PointerEvent>, kind: 'device' | 'furniture',
+  const begin = (e: ThreeEvent<PointerEvent>, kind: 'device' | 'furniture' | 'person',
                  id: string, pos: V3) => {
     e.stopPropagation()
     // NOTE: no setPointerCapture — that would redirect pointermove to
