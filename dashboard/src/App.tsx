@@ -6,7 +6,6 @@ import StatusPage from './pages/StatusPage'
 import LivePage from './pages/LivePage'
 import CapturesPage from './pages/CapturesPage'
 import CalibrationsPage from './pages/CalibrationsPage'
-import ModelsPage from './pages/ModelsPage'
 import AutomationsPage from './pages/AutomationsPage'
 import MetadataPage from './pages/MetadataPage'
 
@@ -15,7 +14,6 @@ const TABS = [
   { to: '/live', label: 'Live' },
   { to: '/captures', label: 'Captures' },
   { to: '/calibrations', label: 'Calibrations' },
-  { to: '/models', label: 'Models' },
   { to: '/automations', label: 'Automations' },
   { to: '/metadata', label: 'Metadata' },
 ]
@@ -239,7 +237,6 @@ export default function App() {
           <Route path="/calibrations" element={<CalibrationsPage />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/captures" element={<CapturesPage />} />
-          <Route path="/models" element={<ModelsPage />} />
           <Route path="/automations" element={<AutomationsPage />} />
           <Route path="/metadata" element={<MetadataPage />} />
           <Route path="*" element={<Navigate to="/status" replace />} />
