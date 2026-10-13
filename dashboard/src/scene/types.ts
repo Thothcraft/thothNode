@@ -64,6 +64,7 @@ export interface BuildingAnchor {
 export interface RoomDevice {
   position_uncertainty_m?: number | null
   device_id: string
+  device_name?: string
   pos: V3
   rot_y?: number
   mount?: Mount

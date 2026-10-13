@@ -329,6 +329,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._sse(d, kinds=qs.get("kind", [""])[0])
         if path == "/api/v1/room":
             return self._json(200, d.room.document())
+        if path == "/api/v1/rooms":
+            return self._json(200, d.shared_rooms())
         if path == "/api/v1/net":
             # Provisioning + link state (local view — raw SSID ok here,
             # the uplink only ever sees ssid_hash via net.link.v1).

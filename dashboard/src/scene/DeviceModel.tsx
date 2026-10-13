@@ -109,7 +109,7 @@ export function DeviceModel({ device, selected = false, showFov = true,
       {showLabel && (
         <Html position={[0, 0.28, 0]} center zIndexRange={[30, 0]}
               wrapperClass="scene-label-wrap">
-          <span className="scene-label">{device.device_id || 'node'}</span>
+          <span className="scene-label">{device.device_name || device.device_id || 'node'}</span>
         </Html>
       )}
     </group>

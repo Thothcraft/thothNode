@@ -703,6 +703,31 @@ class ThothDaemon:
         threading.Thread(target=_push, name="thoth-room-push",
                          daemon=True).start()
 
+    def shared_rooms(self) -> Dict[str, Any]:
+        """Fetch the account's cached room layouts using this node token.
+
+        The Brain endpoint is read-only for device credentials and scopes
+        results to the account that owns this node.
+        """
+        token = self.config.device_token
+        brain = (self.config.brain_url or "").rstrip("/")
+        if not token or not brain:
+            return {"available": False, "rooms": []}
+        try:
+            import json as _json
+            import urllib.request as _req
+            request = _req.Request(
+                f"{brain}/v1/rooms",
+                headers={"Authorization": f"Bearer {token}"})
+            with _req.urlopen(request, timeout=5) as response:
+                payload = _json.loads(response.read() or b"{}")
+            rooms = payload.get("rooms") if isinstance(payload, dict) else []
+            return {"available": True,
+                    "rooms": rooms if isinstance(rooms, list) else []}
+        except Exception as exc:
+            logger.debug("account room fetch failed: %s", exc)
+            return {"available": False, "rooms": []}
+
     def _maybe_refresh_metadata(self, force: bool = False,
                                 inline: bool = False) -> None:
         """Refresh inferred metadata (≥60 s cadence) off the SMA thread.

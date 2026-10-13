@@ -42,6 +42,14 @@ interface SensorInfo {
   metadata?: { name?: string }
 }
 
+interface SharedRoom {
+  device_id: string
+  device_name?: string
+  online?: boolean
+  updated_at?: string | null
+  room: RoomDoc
+}
+
 const sensorLabel = (s: SensorInfo) => s.metadata?.name || s.id
 
 // Camera frames are huge JPEG payloads and only the newest frame is drawn;
@@ -95,6 +103,9 @@ function RawTail({ samples }: { samples: Sample[] }) {
 export default function LivePage() {
   const [sensors, setSensors] = useState<SensorInfo[]>([])
   const [room, setRoom] = useState<RoomDoc | null>(null)
+  const [sharedRooms, setSharedRooms] = useState<SharedRoom[]>([])
+  const [sharedRoomsAvailable, setSharedRoomsAvailable] = useState<boolean | null>(null)
+  const [sceneSource, setSceneSource] = useState('local')
   const [selRoom, setSelRoom] = useState('')
   const [, bump] = useState(0)
   const streamsRef = useRef(new Map<string, StreamState>())
@@ -117,6 +128,10 @@ export default function LivePage() {
         setSelRoom((prev) => prev || (r.body!.room_id ?? ''))
       }
     })
+    get<{ available?: boolean; rooms?: SharedRoom[] }>('/api/v1/rooms').then((r) => {
+      setSharedRoomsAvailable(Boolean(r.body?.available))
+      setSharedRooms(r.body?.rooms ?? [])
+    }).catch(() => setSharedRoomsAvailable(false))
     // Prediction + context layers poll at a slower cadence — they're
     // derived, not sample-rate data.
     const ctxPoll = async () => {
@@ -131,6 +146,12 @@ export default function LivePage() {
     const t = setInterval(() => { void ctxPoll() }, 3000)
     return () => clearInterval(t)
   }, [])
+
+  const selectedSharedRoom = sharedRooms.find(
+    (item) => `shared:${item.device_id}` === sceneSource)
+  const sceneDoc = selectedSharedRoom?.room ?? room
+  const sceneRooms = sceneDoc ? roomOptions(sceneDoc) : []
+  const sceneReadOnly = Boolean(selectedSharedRoom)
 
   const tick = useCallback(async () => {
     if (busyRef.current) return            // never overlap fetch rounds
@@ -288,10 +309,39 @@ export default function LivePage() {
       </div>
 
       <div className="room-pane">
-        {room && roomOptions(room).length > 1 && (
+        <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 5,
+                      display: 'flex', gap: 6, alignItems: 'center' }}>
+          {sharedRooms.length > 0 && (
+            <select className="mini" value={sceneSource}
+                    aria-label="Room layout source"
+                    onChange={(e) => {
+                      const source = e.target.value
+                      setSceneSource(source)
+                      const next = source === 'local'
+                        ? room : sharedRooms.find(
+                          (item) => `shared:${item.device_id}` === source)?.room
+                      setSelRoom(next?.room_id ?? '')
+                    }}>
+              <option value="local">This device · {room?.name || 'room'}</option>
+              {sharedRooms.map((item) => (
+                <option key={item.device_id} value={`shared:${item.device_id}`}>
+                  {item.device_name || item.device_id} · {item.room?.name || 'room'}
+                </option>
+              ))}
+            </select>
+          )}
+          {sceneReadOnly && <span className="mini">shared · read only</span>}
+        </div>
+        {sharedRoomsAvailable === false && (
+          <span className="muted" style={{ position: 'absolute', top: 38, right: 8,
+                                            zIndex: 5, fontSize: 11 }}>
+            account room sync unavailable
+          </span>
+        )}
+        {sceneDoc && sceneRooms.length > 1 && (
           <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 5,
                         display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {roomOptions(room).map((r) => (
+            {sceneRooms.map((r) => (
               <button key={r.room_id || 'primary'} className="mini"
                       style={{
                         opacity: r.room_id === selRoom ? 1 : 0.55,
@@ -306,9 +356,9 @@ export default function LivePage() {
         )}
         {webgl ? (
           <RoomScene
-            room={room ? roomView(room, selRoom || (room.room_id ?? '')) : room}
-            selectedId={selDeviceId}
-            onPick={(p) => {
+            room={sceneDoc ? roomView(sceneDoc, selRoom || (sceneDoc.room_id ?? '')) : sceneDoc}
+            selectedId={sceneReadOnly ? undefined : selDeviceId}
+            onPick={!sceneReadOnly ? (p) => {
               if (p.kind === 'device') {
                 const picked = p.item as RoomDevice
                 const dev = room?.devices?.find(
@@ -319,7 +369,7 @@ export default function LivePage() {
                   (st && (s.type ?? '').toLowerCase() === st))
                 if (match) toggleStream(match.id)
               }
-            }}
+            } : undefined}
           />
         ) : (
           /* Non-WebGL fallback (Part 9): 2D plan — same content, no 3D. */
