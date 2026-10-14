@@ -626,6 +626,13 @@ class _Handler(BaseHTTPRequestHandler):
                     or not body["address"]:
                 return self._json(400, {"error": "address required"})
             return self._json(200, d.ble_unenroll(body["address"]))
+        if path == "/api/v1/wearables/session":
+            # {device_id, state: idle|listening|processing|speaking}
+            for key in ("device_id", "state"):
+                if not isinstance(body.get(key), str) or not body[key]:
+                    return self._json(400, {"error": f"{key} required"})
+            res = d.wearable_session_state(body["device_id"], body["state"])
+            return self._json(200 if res.get("ok") else 404, res)
         if path == "/api/v1/entities":
             return self._json(200, d.entities.upsert(
                 entity_id=body.get("id"), type=str(body.get("type") or "device"),
@@ -643,6 +650,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(202, d.net_provision(
                 body["ssid"], str(body.get("psk") or ""),
                 bool(body.get("hidden"))))
+        if path == "/api/v1/net/disconnect":
+            return self._json(202, d.net_disconnect()
+                              if hasattr(d, "net_disconnect")
+                              else {"accepted": False,
+                                    "error": "unsupported"})
         if path == "/api/internal/prediction":
             # Inject a prediction — drives linked actuators (test hook).
             from whispy.contracts import Prediction

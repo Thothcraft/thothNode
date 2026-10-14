@@ -176,7 +176,32 @@ class ProvisionManager:
                             "psk": psk, "hidden": hidden})
         return {"state": "provisioning", "accepted": True}
 
+    def disconnect(self) -> Dict[str, Any]:
+        """Queue a Wi-Fi disconnect — drops the STA link and re-engages
+        the commissioning surface (BLE GATT / AP fallback) so first-time
+        setup stays reachable."""
+        if not self.enabled:
+            return {"state": self._state, "accepted": False,
+                    "error": "provisioning disabled"}
+        self._requests.put({"op": "disconnect"})
+        return {"state": self._state, "accepted": True}
+
     def _apply(self, req: Dict[str, Any]) -> None:
+        if req.get("op") == "disconnect":
+            if self._ap is not None:
+                try:
+                    self.wifi.ap_stop()
+                except Exception:
+                    pass
+                self._ap = None
+            try:
+                self.wifi.disconnect()
+            except Exception:
+                pass
+            self._loaded = {}
+            self._save()
+            self._set_state("idle")   # tick re-engages BLE commissioning
+            return
         ssid, psk = req.get("ssid"), req.get("psk") or ""
         if not ssid:
             self._fail("ssid required")
@@ -205,8 +230,30 @@ class ProvisionManager:
             self._save()
             self._link_obs(status)
             self._stop_gatt()   # done — retract the commissioning surface
+            self._sync_esp32_wifi(ssid, psk)
         else:
             self._fail("wifi did not connect")
+
+    def _sync_esp32_wifi(self, ssid: str, psk: str) -> None:
+        """Push the same AP credentials to any ESP32 (thoth_csi) on USB —
+        the board's serial console accepts ``wifi=<ssid>,<pass>`` (persists,
+        reboots, joins the AP, then pings the gateway for high-rate CSI).
+        Best-effort: a non-ESP32 port just ignores the line."""
+        import glob
+        import os
+        try:
+            import serial
+        except Exception:
+            return
+        for port in glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"):
+            if os.name == "nt":
+                break   # glob yields nothing on Windows anyway
+            try:
+                with serial.Serial(port, 921600, timeout=0.3) as ser:
+                    ser.write(f"wifi={ssid},{psk}\n".encode())
+                    ser.flush()
+            except Exception:
+                continue
 
     def _fail(self, err: str) -> None:
         self._set_state("failed", err)

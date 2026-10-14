@@ -286,6 +286,13 @@ class ThothDaemon:
                 continue
             try:
                 handle = self._device.sensor(sensor.id)
+                # User-initiated stream: duty-cycled sensors (camera)
+                # stream continuously — the privacy LED is lit while the
+                # capture runs anyway, and 0.5s bursts starve slow opens
+                # (DirectShow ~1s) to zero frames.
+                hcfg = getattr(handle, "_config", None)
+                if isinstance(hcfg, dict) and "idle_s" in hcfg:
+                    hcfg["idle_s"] = 0.0
                 stream = SampleStream(handle.stream, maxlen=4096,
                                       name=sensor.id)
                 stream.start()
@@ -362,20 +369,53 @@ class ThothDaemon:
             from ..bluetooth.pinetime import PinetimeLink
         except Exception:
             return
+        try:
+            from ..bluetooth.pinebuds import PinebudsLink
+        except Exception:
+            PinebudsLink = None  # type: ignore[assignment]
         for rec in ble.known.list():
-            if rec.get("kind") != "watch":
-                continue
+            kind = rec.get("kind")
             did = rec["device_id"]
             link = self._watches.get(did)
             if link is None:
-                link = self._watches[did] = PinetimeLink(
-                    ble, rec["address"], did, self.emit_observation,
-                    ble.source_id)
+                if kind == "watch":
+                    link = self._watches[did] = PinetimeLink(
+                        ble, rec["address"], did, self.emit_observation,
+                        ble.source_id)
+                elif kind == "earbuds" and PinebudsLink is not None:
+                    link = self._watches[did] = PinebudsLink(
+                        ble, rec["address"], did, self.emit_observation,
+                        ble.source_id, emit_event=self.emit_event)
+                else:
+                    continue
             if not link._attached:
                 try:
                     link.attach()
                 except Exception:
                     pass
+
+    def wearable_links(self) -> List[Dict[str, Any]]:
+        """Live central links to enrolled wearables (watch + earbuds)."""
+        out: List[Dict[str, Any]] = []
+        for did, link in self._watches.items():
+            st = link.status() if hasattr(link, "status") else {
+                "subject": did, "connected": link.connected}
+            st["kind"] = ("earbuds" if link.__class__.__name__ ==
+                          "PinebudsLink" else "watch")
+            out.append(st)
+        return out
+
+    def wearable_session_state(self, device_id: str,
+                               state: str) -> Dict[str, Any]:
+        """Voice-session feedback to a pair of enrolled earbuds."""
+        link = self._watches.get(device_id)
+        if link is None or not hasattr(link, "set_session_state"):
+            return {"ok": False, "error": "no earbuds link"}
+        try:
+            return {"ok": bool(link.set_session_state(state)),
+                    "device_id": device_id, "state": state}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
 
     def _start_api(self) -> None:
         from ..local_api import LocalAPIServer
@@ -488,6 +528,11 @@ class ThothDaemon:
             return []
         return self._prov.scan_payload()
 
+    def net_disconnect(self) -> Dict[str, Any]:
+        if self._prov is None:
+            return {"accepted": False, "error": "provisioning disabled"}
+        return self._prov.disconnect()
+
     def calibrate_zone(self, zone: str) -> Dict[str, Any]:
         """RSSI fingerprint calibration — fold the recent per-subject
         RSSI samples into ``zone``'s per-anchor Gaussian distribution
@@ -520,7 +565,7 @@ class ThothDaemon:
             edge = self.entities.relate(p["id"], ent["id"], "wears")
             out["person_id"] = p["id"]
             out["relation"] = edge
-        if kind == "watch":
+        if kind in ("watch", "earbuds"):
             self._attach_watches()
         return out
 
@@ -542,7 +587,8 @@ class ThothDaemon:
         ble = self._ble
         if ble is None:
             return {"known": [], "seen_now": []}
-        return {"known": ble.known.list(), "seen_now": ble.seen_now()}
+        return {"known": ble.known.list(), "seen_now": ble.seen_now(),
+                "links": self.wearable_links()}
 
     def _start_brain_ws(self) -> None:
         """Outbound Brain channel (CONTRACT §2) — only when paired."""
