@@ -533,6 +533,42 @@ class ThothDaemon:
             return {"accepted": False, "error": "provisioning disabled"}
         return self._prov.disconnect()
 
+    # -- ESP32 (thoth_csi) boards ------------------------------------------
+    # Provisioning chain: the board self-reports on its serial line
+    # (SELF_DATA carries ssid/ip; NET_DATA lands on join), the csi
+    # sensor adapter caches it, and the app flips creds back down this
+    # path: phone -> Brain relay -> POST /api/v1/esp32/net -> serial.
+
+    def esp32_status(self) -> Dict[str, Any]:
+        """Last-reported identity + Wi-Fi state per ESP32 board."""
+        boards: List[Dict[str, Any]] = []
+        device = self._device
+        for adapter in (getattr(device, "_adapters", {}) or {}).values():
+            ports_state = getattr(adapter, "ports_state", None)
+            if ports_state is None:
+                continue
+            try:
+                boards.extend(ports_state() or [])
+            except Exception:
+                continue
+        return {"boards": boards}
+
+    def esp32_wifi_set(self, ssid: str, psk: str = "") -> Dict[str, Any]:
+        """Write ``wifi=<ssid>,<psk>`` to every ESP32 console port —
+        the board persists the creds, reboots and joins the AP."""
+        from ..provisioning.manager import (esp32_serial_ports,
+                                            esp32_write_line)
+        ports = esp32_serial_ports()
+        written: List[str] = []
+        for port in ports:
+            try:
+                esp32_write_line(port, f"wifi={ssid},{psk}")
+                written.append(port)
+            except Exception as exc:
+                logger.debug("esp32 wifi write %s failed: %s", port, exc)
+        return {"accepted": True, "ports": written,
+                "count": len(written)}
+
     def calibrate_zone(self, zone: str) -> Dict[str, Any]:
         """RSSI fingerprint calibration — fold the recent per-subject
         RSSI samples into ``zone``'s per-anchor Gaussian distribution

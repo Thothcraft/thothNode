@@ -26,6 +26,40 @@ logger = logging.getLogger(__name__)
 STATES = ("disabled", "idle", "provisioning", "online", "failed", "ap")
 _PROV_FILE = "provisioning.json"
 
+# USB vendor IDs of common ESP32 serial front-ends (Espressif native
+# USB-JTAG, WCH CH343/CH340, Silicon Labs CP210x, FTDI). Only these
+# ports ever get thoth_csi console lines written to them.
+_ESP32_USB_VIDS = (0x303A, 0x1A86, 0x10C4, 0x0403)
+
+
+def esp32_serial_ports() -> List[str]:
+    """Serial ports that plausibly host a thoth_csi ESP32 — Linux glob
+    first (native USB-JTAG enumerates as ttyACM), else pyserial
+    enumeration filtered to known USB vendor IDs."""
+    import glob
+    import os
+    ports = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
+    if ports or os.name != "nt":
+        return ports
+    try:
+        from serial.tools import list_ports
+    except Exception:
+        return []
+    return sorted(p.device for p in list_ports.comports()
+                  if p.device and (p.vid or 0) in _ESP32_USB_VIDS)
+
+
+def esp32_write_line(port: str, line: str,
+                     baud: int = 921600, timeout_s: float = 0.5) -> None:
+    """Write one console line to a thoth_csi board (``wifi=``,
+    ``name=``, …). USB-JTAG ignores baud; the CH343 console runs at the
+    firmware's 921600."""
+    import serial
+    with serial.Serial(port, baud, timeout=timeout_s) as ser:
+        ser.write((line.rstrip("\r\n") + "\n").encode("utf-8",
+                                                     errors="replace"))
+        ser.flush()
+
 
 class ProvisionManager:
     """Owns the bring-up loop. ``wifi`` is injectable — the state machine
@@ -239,19 +273,9 @@ class ProvisionManager:
         the board's serial console accepts ``wifi=<ssid>,<pass>`` (persists,
         reboots, joins the AP, then pings the gateway for high-rate CSI).
         Best-effort: a non-ESP32 port just ignores the line."""
-        import glob
-        import os
-        try:
-            import serial
-        except Exception:
-            return
-        for port in glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"):
-            if os.name == "nt":
-                break   # glob yields nothing on Windows anyway
+        for port in esp32_serial_ports():
             try:
-                with serial.Serial(port, 921600, timeout=0.3) as ser:
-                    ser.write(f"wifi={ssid},{psk}\n".encode())
-                    ser.flush()
+                esp32_write_line(port, f"wifi={ssid},{psk}")
             except Exception:
                 continue
 

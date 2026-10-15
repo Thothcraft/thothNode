@@ -339,6 +339,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"networks":
                                     d.net_scan() if hasattr(d, "net_scan")
                                     else []})
+        if path == "/api/v1/esp32":
+            # Attached thoth_csi boards — last self-reported identity +
+            # Wi-Fi state ("esp32 says it is not connected" leg).
+            return self._json(200, d.esp32_status()
+                              if hasattr(d, "esp32_status")
+                              else {"boards": []})
         if path == "/api/v1/sources/conformance":
             return self._json(200, d.source_conformance())
         if path == "/api/v1/ble/devices":
@@ -655,6 +661,16 @@ class _Handler(BaseHTTPRequestHandler):
                               if hasattr(d, "net_disconnect")
                               else {"accepted": False,
                                     "error": "unsupported"})
+        if path == "/api/v1/esp32/net":
+            # Wi-Fi creds destined for the attached ESP32(s), written
+            # to their serial consoles — independent of whether the
+            # node itself is being provisioned.
+            if not isinstance(body.get("ssid"), str) or not body.get("ssid"):
+                return self._json(400, {"error": "ssid required"})
+            return self._json(202, d.esp32_wifi_set(
+                body["ssid"], str(body.get("psk") or ""))
+                if hasattr(d, "esp32_wifi_set")
+                else {"accepted": False, "error": "unsupported"})
         if path == "/api/internal/prediction":
             # Inject a prediction — drives linked actuators (test hook).
             from whispy.contracts import Prediction
