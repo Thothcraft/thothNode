@@ -167,8 +167,14 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/data" "$THOTH_ROO
 SERVICE_HOME="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 "$SERVICE_HOME/.thoth"
 
-# Seed the two optional example classifiers when the checkout is next to Desktop/models.
-EXAMPLE_MODELS="$(dirname "$THOTH_ROOT")/models"
+# Prefer explicitly supplied models beside the checkout; otherwise use the
+# E2 occupancy examples shipped in this checkout. This keeps a clean node
+# install from starting without the bundled occupancy model.
+EXAMPLE_MODELS="$THOTH_ROOT/models/examples"
+WORKSPACE_MODELS="$(dirname "$THOTH_ROOT")/models"
+if [[ -f "$WORKSPACE_MODELS/radar_occupancy.pt" || -f "$WORKSPACE_MODELS/fusion_occupancy.pt" ]]; then
+  EXAMPLE_MODELS="$WORKSPACE_MODELS"
+fi
 if [[ -d "$EXAMPLE_MODELS" ]]; then
   sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python" "$THOTH_ROOT/setup/seed-models.py" "$EXAMPLE_MODELS" || echo "Example model import skipped; upload models from the dashboard." >&2
 fi

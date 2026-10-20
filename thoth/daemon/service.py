@@ -1076,9 +1076,22 @@ class ThothDaemon:
                          "Authorization": f"Bearer {token}"})
             with _req.urlopen(req, timeout=10) as resp:
                 if resp.status != 200:
-                    logger.debug("heartbeat rejected: %s", resp.status)
+                    logger.warning(
+                        "heartbeat rejected: %s — node will show offline "
+                        "in the portal", resp.status)
         except Exception as exc:
-            logger.debug("heartbeat failed: %s", exc)
+            import urllib.error as _uerr
+            if isinstance(exc, _uerr.HTTPError):
+                # Brain answered but refused the beat — show the reason so
+                # an 'online but invisible' node is diagnosable on-device.
+                try:
+                    detail = exc.read().decode()[:300]
+                except Exception:
+                    detail = str(exc)
+                logger.warning(
+                    "heartbeat rejected: %s %s", exc.code, detail)
+            else:
+                logger.debug("heartbeat failed: %s", exc)
 
     def _heartbeat_inventory(self) -> Dict[str, Any]:
         """Sensor/actuator inventory + LAN endpoint for the registry.

@@ -29,6 +29,7 @@ DEFAULT_ROOM: Dict[str, Any] = {
     "dims": {"w": 6.0, "d": 4.0, "h": 2.6},
     "walls": [],
     "furniture": [],
+    "zones": [],
     "devices": [],
     "persons": [],
     "updated_at": 0.0,
@@ -88,6 +89,31 @@ def normalize_room(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     out["furniture"] = _furniture(doc.get("furniture"))
 
+    # Named sub-regions inside a room. ``rect`` is [center_x, center_z,
+    # width, depth] in room-plan metres; ``polygon`` is an optional
+    # arbitrary [x, z] outline for non-rectangular zones.
+    def _zones(items: Any) -> list:
+        rows = []
+        for z in items or []:
+            if not isinstance(z, dict):
+                continue
+            row = {"id": str(z.get("id") or f"zone-{len(rows)}"),
+                   "name": str(z.get("name") or "")}
+            rect = z.get("rect")
+            if isinstance(rect, (list, tuple)) and len(rect) == 4:
+                row["rect"] = [_num(v) for v in rect]
+            poly = z.get("polygon")
+            if isinstance(poly, (list, tuple)):
+                pts = [[_num(p[0]), _num(p[1])] for p in poly
+                       if isinstance(p, (list, tuple)) and len(p) >= 2]
+                if len(pts) >= 3:
+                    row["polygon"] = pts
+            if "rect" in row or "polygon" in row:
+                rows.append(row)
+        return rows
+
+    out["zones"] = _zones(doc.get("zones"))
+
     # Additional named rooms. The top-level sections describe the
     # "primary" room; each entry here is a fully-formed extra room that
     # devices can be assigned to via ``devices[].room_id``.
@@ -109,6 +135,7 @@ def normalize_room(doc: Dict[str, Any]) -> Dict[str, Any]:
                      "h": _num(rdims.get("h"), 2.6)},
             "walls": rwalls,
             "furniture": _furniture(r.get("furniture")),
+            "zones": _zones(r.get("zones")),
         })
     out["rooms"] = rooms
 

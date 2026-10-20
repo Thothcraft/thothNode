@@ -23,9 +23,15 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 from backend.model_runtime import ModelRegistry
 
-source = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else ROOT.parent / "models"
-if not source.exists():
-    source = ROOT / "models" / "examples"
+if len(sys.argv) > 1:
+    source = Path(sys.argv[1]).expanduser()
+else:
+    external_models = ROOT.parent / "models"
+    bundled_examples = ROOT / "models" / "examples"
+    expected = ("radar_occupancy.pt", "fusion_occupancy.pt")
+    source = (external_models if any((external_models / name).is_file()
+                                     for name in expected)
+              else bundled_examples)
 registry = ModelRegistry(ROOT / "models" / "user")
 existing = {item.get("sha256") for item in registry.list()}
 
