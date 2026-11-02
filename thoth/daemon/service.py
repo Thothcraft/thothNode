@@ -553,11 +553,25 @@ class ThothDaemon:
                 continue
         return {"boards": boards}
 
-    def esp32_wifi_set(self, ssid: str, psk: str = "") -> Dict[str, Any]:
+    def esp32_wifi_set(self, ssid: str = "", psk: str = "",
+                       use_host: bool = False) -> Dict[str, Any]:
         """Write ``wifi=<ssid>,<psk>`` to every ESP32 console port —
-        the board persists the creds, reboots and joins the AP."""
+        the board persists the creds, reboots and joins the AP. With
+        ``use_host`` (or no explicit ssid) the host's own active Wi-Fi
+        credentials are used — "board joins whatever network the host
+        is on" is the default."""
         from ..provisioning.manager import (esp32_serial_ports,
-                                            esp32_write_line)
+                                            esp32_write_line,
+                                            host_wifi_credentials)
+        if use_host or not ssid:
+            creds = host_wifi_credentials()
+            if not creds.get("ssid"):
+                return {"accepted": False,
+                        "error": "host is not on Wi-Fi"}
+            ssid, psk = creds["ssid"] or "", creds.get("psk") or ""
+            if not psk:
+                return {"accepted": False,
+                        "error": "host Wi-Fi password not readable"}
         ports = esp32_serial_ports()
         written: List[str] = []
         for port in ports:

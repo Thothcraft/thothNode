@@ -61,6 +61,63 @@ def esp32_write_line(port: str, line: str,
         ser.flush()
 
 
+def host_wifi_credentials() -> Dict[str, Optional[str]]:
+    """The host's own active Wi-Fi credentials — the default an ESP32
+    should provision with ("board uses the host's network"). nmcli on
+    Linux hosts, netsh on Windows; returns ``{}`` when the host is not
+    on Wi-Fi or the stored PSK isn't readable."""
+    import os
+    import re
+    import subprocess
+
+    def run(cmd: List[str]) -> str:
+        try:
+            return subprocess.check_output(
+                cmd, stderr=subprocess.DEVNULL,
+                timeout=5).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    if os.name != "nt":
+        # nmcli: active 802-11-wireless connection → SSID + stored PSK.
+        dev = run(["nmcli", "-t", "-f",
+                   "DEVICE,TYPE,STATE", "device", "status"])
+        wifi_dev = next(
+            (ln.split(":", 1)[0] for ln in dev.splitlines()
+             if ":wifi:connected" in ln or ":802-11-wireless:connected" in ln),
+            None)
+        if not wifi_dev:
+            return {}
+        info = run(["nmcli", "-t", "-f", "ACTIVE,SSID,DEVICE",
+                    "device", "wifi", "list", "ifname", wifi_dev])
+        ssid = next(
+            (ln.split(":", 2)[1] for ln in info.splitlines()
+             if ln.startswith("yes:")), None)
+        if not ssid:
+            return {}
+        con = run(["nmcli", "-t", "-f", "NAME,TYPE,DEVICE",
+                   "con", "show", "--active"])
+        name = next(
+            (ln.split(":", 3)[0] for ln in con.splitlines()
+             if ":wifi:" in ln or ":802-11-wireless:" in ln), None)
+        psk = ""
+        if name:
+            psk = run(["nmcli", "-s", "-g", "802-11-wireless-security.psk",
+                       "con", "show", name]).strip()
+        return {"ssid": ssid, "psk": psk}
+
+    # Windows: active profile's SSID + cleartext key.
+    iface = run(["netsh", "wlan", "show", "interfaces"])
+    m = re.search(r"^\s*SSID\s*:\s*(.+)$", iface, re.M)
+    if not m:
+        return {}
+    ssid = m.group(1).strip()
+    prof = run(["netsh", "wlan", "show", "profile",
+                f"name={ssid}", "key=clear"])
+    k = re.search(r"Key Content\s*:\s*(.+)$", prof)
+    return {"ssid": ssid, "psk": k.group(1).strip() if k else ""}
+
+
 class ProvisionManager:
     """Owns the bring-up loop. ``wifi`` is injectable — the state machine
     is fully testable with a fake; production uses

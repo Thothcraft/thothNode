@@ -664,11 +664,17 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/esp32/net":
             # Wi-Fi creds destined for the attached ESP32(s), written
             # to their serial consoles — independent of whether the
-            # node itself is being provisioned.
-            if not isinstance(body.get("ssid"), str) or not body.get("ssid"):
-                return self._json(400, {"error": "ssid required"})
+            # node itself is being provisioned. `use_host` (or no ssid)
+            # defaults to the host's own Wi-Fi credentials.
+            use_host = bool(body.get("use_host"))
+            if not use_host and not (
+                    isinstance(body.get("ssid"), str)
+                    and body.get("ssid")):
+                return self._json(400,
+                                  {"error": "ssid required"})
             return self._json(202, d.esp32_wifi_set(
-                body["ssid"], str(body.get("psk") or ""))
+                str(body.get("ssid") or ""),
+                str(body.get("psk") or ""), use_host=use_host)
                 if hasattr(d, "esp32_wifi_set")
                 else {"accepted": False, "error": "unsupported"})
         if path == "/api/internal/prediction":
