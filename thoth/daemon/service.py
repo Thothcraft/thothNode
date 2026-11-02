@@ -553,6 +553,9 @@ class ThothDaemon:
                 continue
         return {"boards": boards}
 
+    # Port each board mirrors its console stream on (inbound listener).
+    SINK_PORT = 5003
+
     def esp32_wifi_set(self, ssid: str = "", psk: str = "",
                        use_host: bool = False) -> Dict[str, Any]:
         """Write ``wifi=<ssid>,<psk>`` to every ESP32 console port —
@@ -580,8 +583,12 @@ class ThothDaemon:
                 written.append(port)
             except Exception as exc:
                 logger.debug("esp32 wifi write %s failed: %s", port, exc)
+        # Once joined, each board mirrors its console stream on
+        # :SINK_PORT — collectors connect to board_ip:SINK_PORT, so a
+        # power-only board (dead USB data path) still streams.
         return {"accepted": True, "ports": written,
-                "count": len(written)}
+                "count": len(written),
+                "sink": f"board_ip:{SINK_PORT}"}
 
     def calibrate_zone(self, zone: str) -> Dict[str, Any]:
         """RSSI fingerprint calibration — fold the recent per-subject
