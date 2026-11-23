@@ -315,6 +315,14 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, d.context_uplink.status())
         if path == "/api/v1/discriminators":
             return self._json(200, d.discriminators.status())
+        if path == "/api/v1/task-models":
+            # Two-models-per-task registry (D-10): selection + latest
+            # presence/zone/activity predictions.
+            sel = d.task_models.selection()
+            sel["latest"] = d.task_models.latest
+            return self._json(200, sel)
+        if path == "/api/v1/task-models/calibration":
+            return self._json(200, d.task_models.calibration_status())
         if path == "/api/v1/capabilities":
             return self._json(200, d.capabilities())
         if path == "/api/v1/predictions":
@@ -677,6 +685,26 @@ class _Handler(BaseHTTPRequestHandler):
                 str(body.get("psk") or ""), use_host=use_host)
                 if hasattr(d, "esp32_wifi_set")
                 else {"accepted": False, "error": "unsupported"})
+        if path == "/api/v1/task-models/calibration/start":
+            # {kind: room|activity, steps?} — guided calibration session.
+            try:
+                return self._json(200, d.task_models.start_calibration(
+                    str(body.get("kind") or ""), steps=body.get("steps")))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+        if path == "/api/v1/task-models/calibration/step":
+            # {label, action: start|stop|retake}
+            try:
+                return self._json(200, d.task_models.step_calibration(
+                    str(body.get("label") or ""),
+                    str(body.get("action") or "")))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+        if path == "/api/v1/task-models/calibration/finish":
+            try:
+                return self._json(200, d.task_models.finish_calibration())
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
         if path == "/api/internal/prediction":
             # Inject a prediction — drives linked actuators (test hook).
             from whispy.contracts import Prediction
@@ -705,6 +733,13 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/room":
             try:
                 return self._json(200, d.room.put(body))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+        if path == "/api/v1/task-models/active":
+            # {task: presence|zone|activity, model: <registered id>}
+            try:
+                return self._json(200, d.task_models.set_active(
+                    str(body.get("task") or ""), str(body.get("model") or "")))
             except ValueError as exc:
                 return self._json(400, {"error": str(exc)})
         return self._json(404, {"error": "not found"})

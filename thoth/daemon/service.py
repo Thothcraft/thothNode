@@ -129,6 +129,14 @@ class ThothDaemon:
         self.discriminators = DiscriminatorRuntime(
             lambda: self.config.get("discriminators") or {},
             config_dir() / "calibration")
+        # Two models per sensing task (D-10): presence/zone from
+        # radar+CSI, activity/posture from wearable IMU windows.
+        # Selection + calibration live under ~/.thoth/task_models.
+        from ..task_models import TaskModelHub
+        self.task_models = TaskModelHub(
+            config_dir() / "task_models",
+            config=lambda: {"sensing": self.config.get("sensing") or {}},
+            device_id=self.device_id)
         # Local live transport — SSE fanout for the dashboard/SDK
         # (observations + prediction edges; never the uplink path).
         self.events = EventHub()
@@ -704,6 +712,8 @@ class ThothDaemon:
         # estimators consume the stream and may emit context.state.v1
         for state in self.estimators.consume(item):
             self._emit_state(state)
+        if item.get("schema") == "imu.window.v1":
+            self._task_model_observation(item)
         return obs_id
 
     def _emit_state(self, state: Dict[str, Any]) -> None:
@@ -971,6 +981,7 @@ class ThothDaemon:
         for prediction in self._run_discriminators(window):
             self.automations.on_prediction(prediction, features=feats)
             last_pred = prediction
+        self._run_task_models(window)
         self.automations.tick(prediction=last_pred, features=feats)
         self._maybe_context_uplink(window)
 
@@ -991,6 +1002,68 @@ class ThothDaemon:
                 SimpleNamespace(runtime_model_id=p.runtime_model_id,
                                 config={}), p)
         return preds
+
+    _TASK_OBS_SCHEMAS = {
+        "presence": "zone.presence.v1",
+        "zone": "zone.zone.v1",
+        "activity": "activity.har.v1",
+    }
+
+    def _run_task_models(self, window: Any) -> None:
+        """Task-model hub (D-10): presence/zone predictions, edge-emitted
+        as observations + prediction events like the model registry."""
+        try:
+            long_window = None
+            if self.task_models.active.get("presence") == "presence-occ-hier@2":
+                long_window = lambda: self._sync.rolling(15.0)
+            preds = self.task_models.step(window, long_window=long_window)
+        except Exception as exc:
+            logger.warning("task models failed: %s", exc)
+            return
+        for p in preds:
+            self.predictions.append(p)
+            key = f"task:{p.get('task')}"
+            label = p.get("label")
+            if self._last_pred_labels.get(key) == label:
+                continue
+            previous = self._last_pred_labels.get(key)
+            self._last_pred_labels[key] = label
+            try:
+                self.events.publish("prediction", p)
+            except Exception:
+                pass
+            try:
+                self.emit_observation(Observation(
+                    schema=self._TASK_OBS_SCHEMAS.get(
+                        p.get("task"), "task.prediction.v1"),
+                    source_id=str(p.get("model") or "task_models"),
+                    subject=p.get("subject"),
+                    confidence=p.get("confidence"),
+                    value=p).validate())
+            except Exception:
+                pass
+            self.emit_event("prediction", {
+                **p, "model_id": key, "previous_label": previous})
+
+    def _task_model_observation(self, item: Dict[str, Any]) -> None:
+        """Feed IMU windows into the activity/posture models."""
+        try:
+            pred = self.task_models.on_observation(item)
+        except Exception as exc:
+            logger.debug("activity model failed: %s", exc)
+            return
+        if not pred:
+            return
+        self.predictions.append(pred)
+        try:
+            self.emit_observation(Observation(
+                schema="activity.har.v1",
+                source_id=str(pred.get("model") or "task_models"),
+                subject=pred.get("subject"),
+                confidence=pred.get("confidence"),
+                value=pred).validate())
+        except Exception:
+            pass
 
     def _maybe_context_uplink(self, window: Any) -> None:
         if not self.context_uplink.due():
