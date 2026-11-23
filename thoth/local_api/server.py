@@ -14,6 +14,7 @@ daemon falls back to serving the UI on the API port.
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -323,6 +324,32 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, sel)
         if path == "/api/v1/task-models/calibration":
             return self._json(200, d.task_models.calibration_status())
+        if path == "/api/v1/ai/status":
+            return self._json(200, d.ai.status())
+        if path == "/api/v1/tasks":
+            return self._json(200, {"tasks": d.tasks.list(),
+                                    "root": str(d.tasks.root())})
+        if path.startswith("/api/v1/tasks/"):
+            rest = path[len("/api/v1/tasks/"):]
+            parts = rest.split("/")
+            task_id = parts[0]
+            if len(parts) == 1:
+                m = d.tasks.get(task_id)
+                return self._json(200 if m else 404,
+                                m or {"error": "not found"})
+            if parts[1] == "files":
+                try:
+                    return self._json(200, {"files": d.tasks.list_files(
+                        task_id, qs.get("sub", ["outputs"])[0])})
+                except KeyError:
+                    return self._json(404, {"error": "not found"})
+            if parts[1] == "file":
+                rel = qs.get("path", [""])[0]
+                data = d.tasks.read_file(task_id, rel)
+                if data is None:
+                    return self._json(404, {"error": "not found"})
+                return self._json(200, {"path": rel,
+                                        "data_b64": base64.b64encode(data).decode()})
         if path == "/api/v1/capabilities":
             return self._json(200, d.capabilities())
         if path == "/api/v1/predictions":
@@ -705,6 +732,61 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, d.task_models.finish_calibration())
             except ValueError as exc:
                 return self._json(400, {"error": str(exc)})
+        if path == "/api/v1/ai/stt":
+            # {audio_b64 (wav), language?} → local faster-whisper
+            audio = body.get("audio_b64")
+            if not isinstance(audio, str) or not audio:
+                return self._json(400, {"error": "audio_b64 required"})
+            try:
+                wav = base64.b64decode(audio)
+            except Exception:
+                return self._json(400, {"error": "invalid base64"})
+            out = d.ai.stt(wav, language=body.get("language"))
+            return self._json(200 if out.get("status") == "ok" else 503, out)
+        if path == "/api/v1/ai/tts":
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return self._json(400, {"error": "text required"})
+            out = d.ai.tts(text.strip())
+            return self._json(200 if out.get("status") == "ok" else 503, out)
+        if path == "/api/v1/ai/chat":
+            messages = body.get("messages")
+            if not isinstance(messages, list) or not messages:
+                return self._json(400, {"error": "messages required"})
+            out = d.ai.chat(messages,
+                            max_tokens=int(body.get("max_tokens") or 512),
+                            temperature=float(body.get("temperature") or 0.7))
+            return self._json(200 if out.get("status") == "ok" else 503, out)
+        if path == "/api/v1/ai/llm/stop":
+            d.ai.stop_llm()
+            return self._json(200, {"stopped": True})
+        if path == "/api/v1/tasks":
+            title = str(body.get("title") or "").strip()
+            goal = str(body.get("goal") or "").strip()
+            if not title or not goal:
+                return self._json(400, {"error": "title and goal required"})
+            return self._json(201, d.tasks.create(
+                title, goal, route=str(body.get("route") or "auto")))
+        if path.startswith("/api/v1/tasks/"):
+            rest = path[len("/api/v1/tasks/"):]
+            parts = rest.split("/")
+            task_id, op = parts[0], (parts[1] if len(parts) > 1 else "")
+            try:
+                if op == "run":
+                    return self._json(202, d.tasks.run(task_id))
+                if op == "cancel":
+                    return self._json(202, d.tasks.cancel(task_id))
+                if op == "inputs":
+                    name = str(body.get("name") or "input.bin")
+                    data = body.get("data_b64") or ""
+                    try:
+                        raw = base64.b64decode(data)
+                    except Exception:
+                        return self._json(400, {"error": "invalid base64"})
+                    return self._json(201, d.tasks.put_input(task_id, name, raw))
+            except KeyError:
+                return self._json(404, {"error": "not found"})
+            return self._json(404, {"error": "not found"})
         if path == "/api/internal/prediction":
             # Inject a prediction — drives linked actuators (test hook).
             from whispy.contracts import Prediction

@@ -137,6 +137,17 @@ class ThothDaemon:
             config_dir() / "task_models",
             config=lambda: {"sensing": self.config.get("sensing") or {}},
             device_id=self.device_id)
+        # Local AI (D-12): smallest STT/TTS/LLM on the node, and the
+        # drive-synced task folder executed by Codex or the local LLM.
+        from ..ai_services import AIServices
+        self.ai = AIServices(
+            lambda: {"ai": self.config.get("ai") or {}},
+            config_dir() / "ai")
+        from ..tasks import TaskStore
+        self.tasks = TaskStore(
+            lambda: ((self.config.get("tasks") or {}).get("root")),
+            lambda: {"tasks": self.config.get("tasks") or {}},
+            ai=self.ai)
         # Local live transport — SSE fanout for the dashboard/SDK
         # (observations + prediction edges; never the uplink path).
         self.events = EventHub()
@@ -927,6 +938,10 @@ class ThothDaemon:
                 self._device.close()
             except Exception:
                 pass
+        try:
+            self.ai.close()
+        except Exception:
+            pass
         if self._api:
             self._api.stop()
         logger.info("ThothDaemon stopped")
