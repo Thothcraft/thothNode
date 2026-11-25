@@ -97,3 +97,17 @@ def test_route_resolution(store, monkeypatch):
     assert store._resolve_route("local") == "local"
     monkeypatch.setattr(store, "_codex_bin", lambda: None)
     assert store._resolve_route("auto") == "local"
+
+
+def test_set_root_relocates_and_validates(store, tmp_path):
+    # Mounted-drive relocation: creates + probes the new root.
+    new_root = tmp_path / "drive" / "ThothTasks"
+    out = store.set_root(str(new_root))
+    assert out == str(new_root)
+    assert new_root.is_dir()
+    assert not (new_root / ".write-probe").exists()
+    # Relative and empty roots refused.
+    with pytest.raises(ValueError):
+        store.set_root("relative/path")
+    with pytest.raises(ValueError):
+        store.set_root("")

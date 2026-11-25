@@ -63,6 +63,24 @@ class TaskStore:
     def root(self) -> Path:
         return Path(self._root_getter() or "~/ThothTasks").expanduser()
 
+    def set_root(self, root: str) -> str:
+        """Relocate the task root (mounted drive, sync target…).
+
+        The directory is created if absent and probed for writability so a
+        typo or unmounted drive fails loudly instead of at first task use.
+        """
+        p = Path(str(root or "").strip()).expanduser()
+        if not root or not p.is_absolute():
+            raise ValueError("root must be an absolute path")
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            probe = p / ".write-probe"
+            probe.write_text("ok")
+            probe.unlink()
+        except OSError as exc:
+            raise ValueError(f"root is not writable: {exc}")
+        return str(p)
+
     def _dir(self, task_id: str) -> Path:
         return self.root() / _safe_id(task_id)
 

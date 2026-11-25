@@ -944,6 +944,17 @@ class _Handler(BaseHTTPRequestHandler):
                     r_th_m=body.get("r_th_m")))
             except ValueError as exc:
                 return self._json(400, {"error": str(exc)})
+        if path == "/api/v1/tasks/root":
+            # {root: "/abs/path"} — relocate the task folders onto a mounted
+            # drive / sync target. Validated + persisted to tasks.root.
+            try:
+                new = d.tasks.set_root(str(body.get("root") or ""))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            cfg = dict(d.config.get("tasks") or {})
+            cfg["root"] = new
+            d.config.set("tasks", cfg)
+            return self._json(200, {"root": new})
         if path == "/api/v1/ai/assistant":
             # Patch the JSON memory — merge facts/people/preferences,
             # replace summary, merge settings (history_s, temperature...).

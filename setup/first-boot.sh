@@ -167,6 +167,34 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/data" "$THOTH_ROO
 SERVICE_HOME="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 "$SERVICE_HOME/.thoth"
 
+# Task folders (executed by codex/local LLM): prefer a mounted drive over the
+# service home. A writable mount under /media or /mnt wins; otherwise the
+# default ~/ThothTasks on the boot drive is used. Runtime-adjustable via
+# PUT /api/v1/tasks/root.
+TASKS_ROOT=""
+for mount_base in "/media/$SERVICE_USER" /media /mnt; do
+    [ -d "$mount_base" ] || continue
+    for mnt in "$mount_base"/*/; do
+        [ -d "$mnt" ] || continue
+        if [ -w "$mnt" ] && mountpoint -q "${mnt%/}"; then
+            TASKS_ROOT="${mnt%/}/ThothTasks"
+            break 2
+        fi
+    done
+done
+if [ -n "$TASKS_ROOT" ]; then
+    install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$TASKS_ROOT"
+    sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python" - "$TASKS_ROOT" <<'PYEOF'
+import json, sys
+from pathlib import Path
+cfg_path = Path.home() / ".thoth" / "config.json"
+cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+cfg.setdefault("tasks", {})["root"] = sys.argv[1]
+cfg_path.write_text(json.dumps(cfg, indent=2))
+PYEOF
+    log "Task root seeded to mounted drive: $TASKS_ROOT"
+fi
+
 # Prefer explicitly supplied models beside the checkout; otherwise use the
 # E2 occupancy examples shipped in this checkout. This keeps a clean node
 # install from starting without the bundled occupancy model.

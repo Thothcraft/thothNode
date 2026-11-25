@@ -230,6 +230,35 @@ def test_dispatch_api_executes_over_local_api(tmp_home):
         daemon.stop()
 
 
+def test_tasks_root_put_relocates(tmp_home, tmp_path):
+    daemon = _daemon(tmp_home, 5990)
+    daemon.start()
+    try:
+        from thoth.daemon.brain_ws import BrainWSClient
+        client = BrainWSClient(
+            daemon, api_base="http://127.0.0.1:5990",
+            local_token=daemon.config.local_token,
+            brain_url="https://api.example.test",
+            device_id="rpi1", device_token="dev-tok")
+        new_root = str(tmp_path / "drive" / "ThothTasks")
+        out = client.dispatch_api("PUT", "/api/v1/tasks/root",
+                                  {"root": new_root})
+        assert out["status"] == 200
+        assert out["body"]["root"] == new_root
+        assert (tmp_path / "drive" / "ThothTasks").is_dir()
+        # persisted → the live root_getter reflects the move
+        assert str(daemon.tasks.root()) == new_root
+        # GET /tasks advertises the new root
+        out = client.dispatch_api("GET", "/api/v1/tasks", None)
+        assert out["body"]["root"] == new_root
+        # relative path refused
+        out = client.dispatch_api("PUT", "/api/v1/tasks/root",
+                                  {"root": "rel/dir"})
+        assert out["status"] == 400
+    finally:
+        daemon.stop()
+
+
 def test_event_frame_falls_back_to_rest(tmp_home):
     # Tiny Brain stub capturing POST /v1/events.
     hits = []
