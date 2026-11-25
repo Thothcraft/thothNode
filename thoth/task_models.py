@@ -41,7 +41,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 TASKS: Dict[str, Tuple[str, str]] = {
-    "presence": ("presence-snr@1", "presence-occ-hier@2"),
+    "presence": ("presence-snr@1", "presence-occ-hier@2", "presence-rf-radar@3"),
     "zone": ("zone-snr@1", "zone-clf@1"),
     "activity": ("har-rules@1", "har-gbm@1"),
 }
@@ -80,6 +80,39 @@ def decode_views(payload: Any) -> Optional[np.ndarray]:
         return v.reshape(4, 24, 24).astype(np.float32)
     except Exception:
         return None
+
+
+RADAR_VIEW_NAMES = ("rd", "ra", "re", "xy")
+
+
+def radar_window_features(frames: List[Tuple[np.ndarray, float]]) -> Optional[Dict[str, float]]:
+    """5 s radar window → the frozen radar-repo feature row.
+
+    Mirrors ``radar/E1/extract_multilink.extract_radar`` (per-window sum,
+    sum-of-squares, abs frame-diff) and ``E1/features._radar_window_feats``
+    (per-view mean / p90 / std p90 / mean delta / peak + SNR mean/max), the
+    inputs ``E2/outputs/frozen/RF__radar.joblib`` was trained on.
+    """
+    if len(frames) < 5:
+        return None
+    views = np.stack([f[0] for f in frames]).astype(np.float64)   # (n, 4, 24, 24)
+    n = views.shape[0]
+    mean_img = views.mean(axis=0)
+    std_img = np.sqrt(np.clip((views ** 2).mean(axis=0) - mean_img ** 2, 0, None))
+    delta = np.abs(np.diff(views, axis=0)).sum(axis=0) / max(n - 1, 1)
+    snr = np.asarray([f[1] for f in frames], dtype=np.float64)
+    out: Dict[str, float] = {
+        "snr_mean": float(np.nanmean(snr)) if np.isfinite(snr).any() else float("nan"),
+        "snr_max": float(np.nanmax(snr)) if np.isfinite(snr).any() else float("nan"),
+    }
+    for vi, v in enumerate(RADAR_VIEW_NAMES):
+        mi, si, di = mean_img[vi], std_img[vi], delta[vi]
+        out[f"{v}_mean"] = float(mi.mean())
+        out[f"{v}_p90"] = float(np.quantile(mi, 0.9))
+        out[f"{v}_std90"] = float(np.quantile(si, 0.9))
+        out[f"{v}_delta"] = float(di.mean())
+        out[f"{v}_peak"] = float(mi.max())
+    return out
 
 
 def csi_amplitude(payload: Any) -> Optional[np.ndarray]:
@@ -221,6 +254,11 @@ class TaskModelHub:
         self._imu: Dict[str, Deque[Tuple[float, Dict[str, float]]]] = defaultdict(lambda: deque(maxlen=16))
         self._zone_clf = self._load_model("zone_clf")
         self._har_gbm = self._load_model("har_gbm")
+        # Frozen radar-repo RF (E2 frozen selection, radar view): bundle
+        # {model, scaler, fill, columns, threshold}. Seeded from
+        # models/radar/presence_rf_radar.joblib on first start.
+        self._rf_radar = self._load_model("presence_rf_radar") or self._seed_rf_radar()
+        self._rf_frames: Deque[Tuple[float, np.ndarray, float]] = deque(maxlen=400)
         self._occ = None
         self._session: Optional[Dict[str, Any]] = None
         self.latest: Dict[str, Dict[str, Any]] = {}
@@ -247,6 +285,19 @@ class TaskModelHub:
             return joblib.load(path)
         except Exception as exc:
             logger.warning("task model %s unreadable: %s", name, exc)
+            return None
+
+    def _seed_rf_radar(self):
+        src = Path(__file__).resolve().parent.parent / "models" / "radar" / "presence_rf_radar.joblib"
+        if not src.exists():
+            return None
+        try:
+            import joblib
+            obj = joblib.load(src)
+            self._save_model("presence_rf_radar", obj)
+            return obj
+        except Exception as exc:
+            logger.warning("presence-rf-radar seed unreadable: %s", exc)
             return None
 
     def _save_model(self, name: str, obj: Any) -> None:
@@ -326,6 +377,9 @@ class TaskModelHub:
             views = decode_views(s.payload)
             if views is None:
                 continue
+            snr_f = s.payload.get("snr_f") if isinstance(s.payload, dict) else None
+            self._rf_frames.append((float(s.timestamp), views,
+                                    float(snr_f) if isinstance(snr_f, (int, float)) else float("nan")))
             sess = self._session
             if sess and sess["kind"] == "room" and sess.get("current") == "EMPTY":
                 if len(sess["empty_views"]) < 1200:
@@ -373,6 +427,8 @@ class TaskModelHub:
         model = self.active["presence"]
         if model == "presence-occ-hier@2":
             return self._presence_heavy(long_window, now)
+        if model == "presence-rf-radar@3":
+            return self._presence_rf_radar(now)
         if feats is None:
             return {"task": "presence", "model": model, "label": "unknown", "confidence": 0.0,
                     "scores": {}, "meta": {"reason": "no radar frames"}, "ts": now}
@@ -394,6 +450,36 @@ class TaskModelHub:
                          "thresholds_db": self._thresholds(), "calibrated": calibrated,
                          "frames": feats["frames"]},
                 "ts": now}
+
+    def _presence_rf_radar(self, now: float) -> Dict[str, Any]:
+        model = "presence-rf-radar@3"
+        base = {"task": "presence", "model": model, "ts": now}
+        bundle = self._rf_radar
+        if not bundle:
+            return {**base, "label": "unknown", "confidence": 0.0, "scores": {},
+                    "meta": {"reason": "model bundle missing"}}
+        frames = [(v, snr) for t, v, snr in self._rf_frames if now - t <= 5.0]
+        feats = radar_window_features(frames)
+        if feats is None:
+            return {**base, "label": "unknown", "confidence": 0.0, "scores": {},
+                    "meta": {"reason": "need ≥5 radar frames in 5 s", "frames": len(frames)}}
+        try:
+            cols = list(bundle["columns"])
+            fill = np.asarray(bundle["fill"], dtype=np.float64)
+            x = np.asarray([feats.get(c, float("nan")) for c in cols], dtype=np.float64)
+            bad = ~np.isfinite(x)
+            x[bad] = fill[bad]
+            p = float(bundle["model"].predict_proba(bundle["scaler"].transform(x[None, :]))[0, 1])
+        except Exception as exc:
+            logger.warning("presence-rf-radar failed: %s", exc)
+            return {**base, "label": "unknown", "confidence": 0.0, "scores": {},
+                    "meta": {"reason": f"model error: {type(exc).__name__}"}}
+        thr = float(bundle.get("threshold", 0.6045833333333333))
+        label = "occupied" if p >= thr else "empty"
+        return {**base, "label": label,
+                "confidence": round(p if label == "occupied" else 1 - p, 3),
+                "scores": {"occupied": round(p, 3), "empty": round(1 - p, 3)},
+                "meta": {"threshold": thr, "frames": len(frames)}}
 
     def _presence_heavy(self, long_window, now) -> Dict[str, Any]:
         model = "presence-occ-hier@2"

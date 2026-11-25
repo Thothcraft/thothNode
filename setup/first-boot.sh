@@ -144,7 +144,7 @@ fi
 # Hardware/runtime deps the daemon's optional drivers need at runtime.
 "$VENV_DIR/bin/python" -m pip install -q \
     requests 'PyJWT>=2.8.0' numpy spidev gpiozero pyserial pexpect \
-    bleak dbus-next
+    bleak dbus-next joblib 'scikit-learn>=1.9.1'
 
 if [ "$THOTH_PROFILE" = "lite" ]; then
     # Lite (Pi 3 / 1 GB): skip the heavy scientific + inference wheels. They are

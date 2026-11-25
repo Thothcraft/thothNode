@@ -262,3 +262,41 @@ def test_calibration_guards(hub):
         hub.step_calibration("NOPE", "start")
     with pytest.raises(ValueError):
         hub.step_calibration("EMPTY", "bogus")
+
+
+# -- presence-rf-radar@3 (frozen radar-repo RF) ---------------------------------
+
+def test_radar_window_features_match_repo_aggregates():
+    from thoth.task_models import radar_window_features, RADAR_VIEW_NAMES
+    rng = np.random.default_rng(0)
+    frames = [(rng.random((4, 24, 24)).astype(np.float32), float(i)) for i in range(10)]
+    feats = radar_window_features(frames)
+    v = np.stack([f[0] for f in frames]).astype(np.float64)
+    # radar/E1: S/n, sqrt(Q/n - mean^2), D/(n-1)
+    S, Q, n = v.sum(0), (v ** 2).sum(0), len(frames)
+    D = np.abs(np.diff(v, axis=0)).sum(0)
+    mean, std = S / n, np.sqrt(np.clip(Q / n - (S / n) ** 2, 0, None))
+    for i, name in enumerate(RADAR_VIEW_NAMES):
+        assert feats[f"{name}_mean"] == pytest.approx(mean[i].mean())
+        assert feats[f"{name}_p90"] == pytest.approx(np.quantile(mean[i], 0.9))
+        assert feats[f"{name}_std90"] == pytest.approx(np.quantile(std[i], 0.9))
+        assert feats[f"{name}_delta"] == pytest.approx((D[i] / (n - 1)).mean())
+        assert feats[f"{name}_peak"] == pytest.approx(mean[i].max())
+    assert feats["snr_mean"] == pytest.approx(4.5) and feats["snr_max"] == 9.0
+    assert radar_window_features(frames[:4]) is None
+
+
+def test_presence_rf_radar_runs_frozen_bundle(tmp_path):
+    pytest.importorskip("sklearn")
+    hub = TaskModelHub(tmp_path)
+    if hub._rf_radar is None:
+        pytest.skip("frozen bundle not loadable here")
+    assert "presence-rf-radar@3" in TASKS["presence"]
+    hub.set_active("presence", "presence-rf-radar@3")
+    now = time.time()
+    samples = [_radar_sample(_views(12.0), ts=now - 4 + i * 0.5) for i in range(8)]
+    out = hub.step(_window(samples), now=now)
+    pres = next(p for p in out if p["task"] == "presence")
+    assert pres["model"] == "presence-rf-radar@3"
+    assert pres["label"] in ("occupied", "empty")
+    assert 0.0 <= pres["scores"]["occupied"] <= 1.0
