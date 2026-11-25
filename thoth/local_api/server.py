@@ -152,6 +152,42 @@ class _Handler(BaseHTTPRequestHandler):
             pass
         return {}
 
+    def _raw_body(self) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            return self.rfile.read(length) if length else b""
+        except Exception:
+            return b""
+
+    def _multipart_file(self) -> tuple:
+        """(file_bytes, params) from a multipart/form-data body — the
+        whisper.cpp ``/inference`` convention the app's localWhisper
+        provider speaks (``file`` audio part + scalar fields)."""
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype or "boundary=" not in ctype:
+            return self._raw_body(), {}
+        boundary = ctype.split("boundary=", 1)[1].strip().strip('"').encode()
+        raw = self._raw_body()
+        audio, params = b"", {}
+        for part in raw.split(b"--" + boundary):
+            if not part or part in (b"--\r\n", b"--", b"\r\n"):
+                continue
+            head, _, content = part.partition(b"\r\n\r\n")
+            if not content:
+                continue
+            content = content.rstrip(b"\r\n")
+            disp = head.lower()
+            name = ""
+            for token in disp.split(b";"):
+                token = token.strip()
+                if token.startswith(b'name='):
+                    name = token[5:].strip(b'"').decode("utf-8", "replace")
+            if name == "file" or b"filename=" in disp:
+                audio = content
+            elif name:
+                params[name] = content.decode("utf-8", "replace")
+        return audio, params
+
     def log_message(self, *args):  # quiet
         pass
 
@@ -326,6 +362,15 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, d.task_models.calibration_status())
         if path == "/api/v1/ai/status":
             return self._json(200, d.ai.status())
+        if path == "/api/v1/ai/assistant":
+            # JSON memory + settings for the earbuds/LLM screen.
+            return self._json(200, d.assistant.memory())
+        if path == "/api/v1/voice":
+            sess = d.voice.session()
+            return self._json(200, {"session": sess.status() if sess else None})
+        if path == "/api/v1/task-models/sensing":
+            # Live per-direction signal + per-zone occupancy (6 sections).
+            return self._json(200, d.task_models.sensing_snapshot())
         if path == "/api/v1/tasks":
             return self._json(200, {"tasks": d.tasks.list(),
                                     "root": str(d.tasks.root())})
@@ -337,6 +382,11 @@ class _Handler(BaseHTTPRequestHandler):
                 m = d.tasks.get(task_id)
                 return self._json(200 if m else 404,
                                 m or {"error": "not found"})
+            if parts[1] == "chat":
+                try:
+                    return self._json(200, {"entries": d.tasks.chat_log(task_id)})
+                except KeyError:
+                    return self._json(404, {"error": "not found"})
             if parts[1] == "files":
                 try:
                     return self._json(200, {"files": d.tasks.list_files(
@@ -513,6 +563,29 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(
                         403, {"error": "account does not own this node"})
             return self._json(200, {"token": self.server.token})  # type: ignore[attr-defined]
+        if path == "/inference" or path == "/api/v1/inference":
+            # whisper.cpp-compatible STT — the app's localWhisper provider
+            # posts multipart ``file`` here; auth via Bearer or ?token=
+            # (app sends the node token as a URL param since STT clients
+            # can't always set headers).
+            qs = parse_qs(urlparse(self.path).query)
+            if not (self._authorized_header() or self._token_qs_ok(qs)):
+                return self._json(401, {"error": "unauthorized"})
+            audio, params = self._multipart_file()
+            if not audio:
+                return self._json(400, {"error": "audio file required"})
+            out = self.daemon.ai.stt(audio, language=params.get("language") or None)
+            if out.get("status") != "ok":
+                return self._json(503, out)
+            # whisper.cpp verbose_json shape — the app's OpenAI schema
+            # reads text + segments[].
+            return self._json(200, {
+                "text": out.get("text", ""),
+                "language": out.get("language") or params.get("language") or "en",
+                "duration": 0.0,
+                "segments": [{"start": 0.0, "end": 0.0,
+                              "text": out.get("text", "")}]
+                if out.get("text") else []})
         if not self._authorized():
             return
         body = self._body()
@@ -760,6 +833,35 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/ai/llm/stop":
             d.ai.stop_llm()
             return self._json(200, {"stopped": True})
+        if path == "/api/v1/ai/assistant/chat":
+            text = body.get("text") or body.get("message")
+            if not isinstance(text, str) or not text.strip():
+                return self._json(400, {"error": "text required"})
+            out = d.assistant.chat(
+                text.strip(),
+                max_tokens=(int(body["max_tokens"]) if body.get("max_tokens") else None),
+                reflect=body.get("reflect"))
+            return self._json(200 if out.get("status") == "ok" else 503, out)
+        if path == "/api/v1/voice/open":
+            sess = d.voice.open(str(body.get("device_id") or ""))
+            return self._json(200, sess.status())
+        if path == "/api/v1/voice/close":
+            d.voice.close()
+            return self._json(200, {"closed": True})
+        if path == "/api/v1/voice/turn":
+            # {audio_b64 (wav), language?, speak?} — one voice turn:
+            # STT → assistant → TTS (+ buds session feedback).
+            audio = body.get("audio_b64")
+            if not isinstance(audio, str) or not audio:
+                return self._json(400, {"error": "audio_b64 required"})
+            try:
+                wav = base64.b64decode(audio)
+            except Exception:
+                return self._json(400, {"error": "invalid base64"})
+            sess = d.voice.open(str(body.get("device_id") or ""))
+            out = sess.turn(wav, language=body.get("language"),
+                            speak=bool(body.get("speak", True)))
+            return self._json(200 if out.get("status") == "ok" else 503, out)
         if path == "/api/v1/tasks":
             title = str(body.get("title") or "").strip()
             goal = str(body.get("goal") or "").strip()
@@ -776,6 +878,16 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(202, d.tasks.run(task_id))
                 if op == "cancel":
                     return self._json(202, d.tasks.cancel(task_id))
+                if op == "chat":
+                    # Shell-like turn in the task folder — codex exec or
+                    # the local LLM; logged to chat.jsonl on the drive.
+                    text = body.get("text") or body.get("message")
+                    if not isinstance(text, str) or not text.strip():
+                        return self._json(400, {"error": "text required"})
+                    out = d.tasks.chat(task_id, text.strip(),
+                                       route=str(body.get("route") or "auto"))
+                    return self._json(
+                        200 if out.get("status") == "ok" else 202, out)
                 if op == "inputs":
                     name = str(body.get("name") or "input.bin")
                     data = body.get("data_b64") or ""
@@ -824,6 +936,18 @@ class _Handler(BaseHTTPRequestHandler):
                     str(body.get("task") or ""), str(body.get("model") or "")))
             except ValueError as exc:
                 return self._json(400, {"error": str(exc)})
+        if path == "/api/v1/task-models/thresholds":
+            # {sectors?: {L,M,R}, zones?: {L_NEAR..R_FAR}, r_th_m?}
+            try:
+                return self._json(200, d.task_models.set_thresholds(
+                    sectors=body.get("sectors"), zones=body.get("zones"),
+                    r_th_m=body.get("r_th_m")))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+        if path == "/api/v1/ai/assistant":
+            # Patch the JSON memory — merge facts/people/preferences,
+            # replace summary, merge settings (history_s, temperature...).
+            return self._json(200, d.assistant.put_memory(body))
         return self._json(404, {"error": "not found"})
 
     def _authorized_header(self) -> bool:
@@ -847,6 +971,8 @@ class _Handler(BaseHTTPRequestHandler):
             from ..calibration import delete as _del_cal
             ok = _del_cal(path[len("/api/calibrations/"):])
             return self._json(200 if ok else 404, {"ok": ok})
+        if path == "/api/v1/ai/assistant/memory":
+            return self._json(200, d.assistant.clear_memory())
         return self._json(404, {"error": "not found"})
 
 

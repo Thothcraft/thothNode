@@ -410,6 +410,85 @@ class TaskModelHub:
         default = float(self._sensing_cfg().get("default_snr_db", 6.0))
         return {d: float(th.get(d, default)) for d in SECTORS}
 
+    # -- live sensing snapshot (room1 device screen) ------------------------------
+    def zone_threshold(self, zone: str) -> float:
+        """Occupied SNR threshold for a 6-section zone. Per-zone overrides
+        (``cal["zone_thresholds"]``) fall back to the sector threshold."""
+        if zone not in ZONES:
+            raise ValueError(f"unknown zone {zone!r}")
+        zt = self.cal.get("zone_thresholds") or {}
+        if zone in zt:
+            return float(zt[zone])
+        return self._thresholds().get(zone[0], 6.0)
+
+    def set_thresholds(self, sectors: Optional[Dict[str, float]] = None,
+                       zones: Optional[Dict[str, float]] = None,
+                       r_th_m: Optional[float] = None) -> Dict[str, Any]:
+        """Easy threshold setting from the room1 screen — per-sector and/or
+        per-zone occupied thresholds plus the near/far range boundary."""
+        with self._lock:
+            if sectors:
+                th = self.cal.setdefault("thresholds", {})
+                for d, v in sectors.items():
+                    if d not in SECTORS:
+                        raise ValueError(f"unknown sector {d!r}")
+                    th[d] = float(v)
+            if zones:
+                zt = self.cal.setdefault("zone_thresholds", {})
+                for z, v in zones.items():
+                    if z not in ZONES:
+                        raise ValueError(f"unknown zone {z!r}")
+                    if v is None:
+                        zt.pop(z, None)
+                    else:
+                        zt[z] = float(v)
+            if r_th_m is not None:
+                r = float(r_th_m)
+                if not (0.05 <= r <= self.snr.max_range_m):
+                    raise ValueError(f"r_th_m {r} out of range")
+                self.cal["r_th_m"] = r
+            self._write_json(self._cal_path, self.cal)
+        return self.sensing_snapshot()
+
+    def _zone_band_row(self, band: str) -> float:
+        r_th = float(self.cal.get("r_th_m", self.snr.max_range_m / 2.0))
+        return r_th / 2.0 if band == "NEAR" else (r_th + self.snr.max_range_m) / 2.0
+
+    def sensing_snapshot(self, window_s: float = 2.5) -> Dict[str, Any]:
+        """Live per-direction signal + per-zone occupancy for the room1
+        device screen: sector SNR vs threshold, range band → 6 zones."""
+        now = time.time()
+        frames = [f for t, f in self._frames if now - t <= window_s][-10:]
+        th = self._thresholds()
+        sector_rows = {d: [f[d][1] for f in frames] for d in SECTORS}
+        sectors: Dict[str, Any] = {}
+        for d in SECTORS:
+            snr = float(np.mean([f[d][0] for f in frames])) if frames else 0.0
+            row = float(np.median(sector_rows[d])) if sector_rows[d] else 0.0
+            sectors[d] = {"snr_db": round(snr, 2), "threshold_db": th[d],
+                          "margin_db": round(snr - th[d], 2),
+                          "range_m": round(self.snr.row_to_m(row), 2),
+                          "occupied": bool(frames) and snr > th[d]}
+        r_th = float(self.cal.get("r_th_m", self.snr.max_range_m / 2.0))
+        zones: Dict[str, Any] = {}
+        for z in ZONES:
+            sector, band = z.split("_", 1)
+            sec = sectors[sector]
+            in_band = (sec["range_m"] <= r_th) == (band == "NEAR")
+            zones[z] = {"occupied": bool(sec["occupied"] and in_band),
+                        "snr_db": sec["snr_db"],
+                        "threshold_db": self.zone_threshold(z),
+                        "sector": sector, "band": band}
+            # Per-zone override applies to the sector's margin check too.
+            if self.cal.get("zone_thresholds") and z in self.cal["zone_thresholds"]:
+                zones[z]["occupied"] = bool(in_band and sec["snr_db"] > zones[z]["threshold_db"])
+        presence = self.latest.get("presence") or {}
+        zone_pred = self.latest.get("zone") or {}
+        return {"ts": now, "frames": len(frames),
+                "sectors": sectors, "zones": zones, "r_th_m": r_th,
+                "presence": presence.get("label"), "zone": zone_pred.get("label"),
+                "active": dict(self.active)}
+
     def _radar_summary(self, now: float) -> Optional[Dict[str, Any]]:
         frames = [f for t, f in self._frames if now - t <= 2.5][-10:]
         if not frames:
@@ -579,6 +658,30 @@ class TaskModelHub:
         self._record_activity_sample(subject, f, now)
         pred = self._run_activity(subject, f, now)
         self.latest[f"activity:{subject}"] = pred
+        fused = self._fused_activity(now)
+        if fused is not None:
+            self.latest["activity:fused"] = fused
+            return fused          # fused prediction is the better signal
+        return pred
+
+    def _fused_activity(self, now: float, window_s: float = 2.0) -> Optional[Dict[str, Any]]:
+        """Watch + necklace IMU fusion: when ≥2 subjects report fresh
+        windows, combine their features (mean) into one activity
+        prediction — more robust than either device alone."""
+        subjects = [s for s, dq in self._imu.items()
+                    if dq and now - dq[-1][0] <= window_s]
+        if len(subjects) < 2:
+            return None
+        feats = []
+        for s in subjects:
+            # Use the freshest feature row per subject.
+            feats.append(self._imu[s][-1][1])
+        f = {k: float(np.mean([x[k] for x in feats])) for k in _IMU_KEYS}
+        pred = self._run_activity("fused", f, now)
+        pred["meta"]["sources"] = sorted(subjects)
+        pred["meta"]["fusion"] = "mean"
+        # Confidence gets a small boost — two sensors agreeing.
+        pred["confidence"] = round(min(1.0, pred.get("confidence", 0.0) + 0.1), 3)
         return pred
 
     def _rules(self) -> Dict[str, float]:
@@ -638,9 +741,17 @@ class TaskModelHub:
     def start_calibration(self, kind: str, steps: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         if kind not in ("room", "activity"):
             raise ValueError("kind must be 'room' or 'activity'")
+        catalog = ROOM_STEPS if kind == "room" else ACTIVITY_STEPS
+        if steps and all(isinstance(s, str) for s in steps):
+            # Subset by label (e.g. the watch's stand/sit/sleep session).
+            by_label = {st["label"]: st for st in catalog}
+            unknown = [s for s in steps if s not in by_label]
+            if unknown:
+                raise ValueError(f"unknown calibration steps: {unknown}")
+            steps = [dict(by_label[s], optional=False) for s in steps]
         with self._lock:
             self._session = {"kind": kind, "id": f"cal-{int(time.time())}",
-                             "steps": steps or (ROOM_STEPS if kind == "room" else ACTIVITY_STEPS),
+                             "steps": steps or catalog,
                              "current": None, "data": defaultdict(list), "empty_views": [],
                              "started_at": time.time()}
         return self.calibration_status()

@@ -106,6 +106,7 @@ class ThothDaemon:
         # post-commit ack or by the _OBS_BATCH_ACK_TIMEOUT_S expiry.
         self._obs_inflight: Dict[str, Any] = {}
         self.observations: Deque[Dict[str, Any]] = deque(maxlen=500)
+        self._recent_gestures: Deque[Dict[str, Any]] = deque(maxlen=100)
         from ..radio_evidence import RadioEvidenceBridge
         self._radio_evidence = RadioEvidenceBridge(self.device_id)
         # Node-side context estimators — observations → versioned state
@@ -148,6 +149,20 @@ class ThothDaemon:
             lambda: ((self.config.get("tasks") or {}).get("root")),
             lambda: {"tasks": self.config.get("tasks") or {}},
             ai=self.ai)
+        # Personal assistant — local LLM with a JSON memory file and the
+        # live node timeline (predictions/gestures) injected as context.
+        # Used by the buds voice chat and the app's LLM settings screen.
+        from ..assistant import Assistant
+        self.assistant = Assistant(
+            self.ai, config_dir() / "ai" / "memory.json",
+            context_fn=self._assistant_timeline)
+        # Voice sessions — a bud double-tap opens one; turns run
+        # STT → assistant → TTS with session-state feedback to the buds.
+        from ..voice import VoiceManager
+        self.voice = VoiceManager(
+            self.ai, self.assistant,
+            feedback_for=self._buds_feedback_for,
+            emit_event=self._node_event)
         # Local live transport — SSE fanout for the dashboard/SDK
         # (observations + prediction edges; never the uplink path).
         self.events = EventHub()
@@ -404,7 +419,7 @@ class ThothDaemon:
                 elif kind == "earbuds" and PinebudsLink is not None:
                     link = self._watches[did] = PinebudsLink(
                         ble, rec["address"], did, self.emit_observation,
-                        ble.source_id, emit_event=self.emit_event)
+                        ble.source_id, emit_event=self._wearable_event)
                 else:
                     continue
             if not link._attached:
@@ -692,6 +707,73 @@ class ThothDaemon:
                 device_token=token).start()
         except Exception as exc:
             logger.debug("brain ws client not started: %s", exc)
+
+    def _assistant_timeline(self, history_s: float) -> List[Dict[str, Any]]:
+        """Recent events for the assistant's context window.
+
+        Prediction dicts (task/label/ts) plus the latest wearable
+        gestures, newest last, within ``history_s`` seconds."""
+        now = time.time()
+        out: List[Dict[str, Any]] = []
+        for p in self.predictions:
+            ts = p.get("ts") or p.get("timestamp")
+            if isinstance(ts, (int, float)) and now - ts <= history_s:
+                out.append({"kind": "prediction", "task": p.get("task"),
+                            "label": p.get("label"), "device": p.get("subject"),
+                            "ts": ts})
+        for g in self._recent_gestures:
+            if now - g.get("ts", 0) <= history_s:
+                out.append(dict(g, kind="gesture"))
+        out.sort(key=lambda e: e["ts"])
+        return out
+
+    def _buds_feedback_for(self, device_id: str):
+        """Session-state writer for the earbuds link — prefers the named
+        link, falls back to the first connected PinebudsLink."""
+        def _first_buds():
+            for did, link in self._watches.items():
+                if hasattr(link, "set_session_state") and link.connected:
+                    return link
+            return None
+
+        link = self._watches.get(device_id)
+        if link is not None and not hasattr(link, "set_session_state"):
+            link = None
+        link = link or _first_buds()
+        if link is None:
+            return None
+        return lambda state: link.set_session_state(state)
+
+    def _node_event(self, kind: str, data: Dict[str, Any]) -> None:
+        """Local event fanout (SSE) + Brain uplink."""
+        try:
+            self.events.publish(kind, data)
+        except Exception:
+            pass
+        self.emit_event(kind, data)
+
+    def _wearable_event(self, kind: str, data: Dict[str, Any]) -> None:
+        """Wearable callback (PinebudsLink): gestures feed the voice
+        manager and the assistant timeline before going out."""
+        if kind == "wearable_gesture":
+            try:
+                self._recent_gestures.append({
+                    "ts": float(data.get("timestamp") or time.time()),
+                    "gesture": data.get("gesture"),
+                    "action": data.get("action"),
+                    "device": data.get("subject")})
+            except Exception:
+                pass
+            try:
+                handled = self.voice.on_gesture(data)
+                if handled.get("handled"):
+                    self._node_event("voice_session", {
+                        "session": handled.get("session"),
+                        "gesture": data.get("gesture"),
+                        "device_id": data.get("subject")})
+            except Exception as exc:
+                logger.debug("voice gesture hook failed: %s", exc)
+        self._node_event(kind, data)
 
     def emit_event(self, kind: str, data: Dict[str, Any]) -> None:
         """Push a node→Brain frame (WS when connected, REST fallback)."""
