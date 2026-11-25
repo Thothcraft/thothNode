@@ -238,6 +238,7 @@ class BluetoothSubsystem:
                 rec = self.known.get(ah)
                 dev = self._devices[ah] = {
                     "addr_hash": ah,
+                    "address": adv.address,
                     "enrolled": rec is not None,
                     "subject": rec["device_id"] if rec
                                else f"device:ble:{ah[:12]}",
@@ -256,6 +257,7 @@ class BluetoothSubsystem:
             else:
                 dev["rssi_ema"] += 0.35 * (adv.rssi - dev["rssi_ema"])
                 dev["last_seen"] = now
+                dev["address"] = adv.address
                 if adv.name and not dev.get("name"):
                     dev["name"] = adv.name
                 if not dev["seen"]:
@@ -575,6 +577,9 @@ class BluetoothSubsystem:
                 "rssi_dbm": int(round(d["rssi_ema"])),
                 "last_seen": d["last_seen"], "kind": d["kind"],
                 "name": d.get("name"),
+                # LAN-API only — lets any linked client enroll a device the
+                # node can see (same trust level as known[].address).
+                "address": d.get("address"),
             } for d in self._devices.values()
                 if d["seen"] and now - d["last_seen"] <= gone_after]
 

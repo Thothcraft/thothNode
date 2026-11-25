@@ -163,6 +163,11 @@ class ThothDaemon:
             self.ai, self.assistant,
             feedback_for=self._buds_feedback_for,
             emit_event=self._node_event)
+        # Third-party mounts (Google Drive via rclone) — the app links
+        # the account, the node keeps it mounted; tasks.root can live
+        # inside the mount so codex works on synced files.
+        from ..integrations import DriveManager
+        self.drive = DriveManager(self.config)
         # Local live transport — SSE fanout for the dashboard/SDK
         # (observations + prediction edges; never the uplink path).
         self.events = EventHub()
@@ -219,6 +224,8 @@ class ThothDaemon:
         self._start_brain_ws()
         self._start_bluetooth()
         self._start_provisioning()
+        # Re-mount a linked Drive after reboot.
+        self.drive.ensure_mounted()
         # First inferred refresh off the SMA thread — geo probes egress.
         self._maybe_refresh_metadata(force=True)
         logger.info("ThothDaemon started: %d sensor stream(s)", len(self._streams))
@@ -584,6 +591,23 @@ class ThothDaemon:
         if self._prov is None:
             return {"accepted": False, "error": "provisioning disabled"}
         return self._prov.disconnect()
+
+    # -- integrations ------------------------------------------------------------
+
+    def drive_status(self) -> Dict[str, Any]:
+        return self.drive.status()
+
+    def drive_authorize(self, token_json: str) -> Dict[str, Any]:
+        return self.drive.authorize(token_json)
+
+    def drive_mount(self) -> Dict[str, Any]:
+        return self.drive.mount()
+
+    def drive_unmount(self) -> Dict[str, Any]:
+        return self.drive.unmount()
+
+    def fs_list(self, path: str) -> Dict[str, Any]:
+        return self.drive.list_dir(path)
 
     # -- ESP32 (thoth_csi) boards ------------------------------------------
     # Provisioning chain: the board self-reports on its serial line

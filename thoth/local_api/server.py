@@ -424,6 +424,15 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"networks":
                                     d.net_scan() if hasattr(d, "net_scan")
                                     else []})
+        if path == "/api/v1/integrations/drive":
+            return self._json(200, d.drive_status())
+        if path == "/api/v1/fs":
+            target = (parse_qs(urlparse(self.path).query)
+                      .get("path") or [""])[0]
+            if not target:
+                return self._json(400, {"error": "path required"})
+            out = d.fs_list(target)
+            return self._json(200 if out.get("ok") else 400, out)
         if path == "/api/v1/esp32":
             # Attached thoth_csi boards — last self-reported identity +
             # Wi-Fi state ("esp32 says it is not connected" leg).
@@ -801,6 +810,15 @@ class _Handler(BaseHTTPRequestHandler):
                               if hasattr(d, "net_disconnect")
                               else {"accepted": False,
                                     "error": "unsupported"})
+        if path == "/api/v1/integrations/drive/token":
+            token = str(body.get("token") or "").strip()
+            if not token:
+                return self._json(400, {"error": "token required"})
+            return self._json(200, d.drive_authorize(token))
+        if path == "/api/v1/integrations/drive/mount":
+            return self._json(200, d.drive_mount())
+        if path == "/api/v1/integrations/drive/unmount":
+            return self._json(200, d.drive_unmount())
         if path == "/api/v1/esp32/net":
             # Wi-Fi creds destined for the attached ESP32(s), written
             # to their serial consoles — independent of whether the
