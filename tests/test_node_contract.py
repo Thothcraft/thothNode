@@ -259,6 +259,74 @@ def test_tasks_root_put_relocates(tmp_home, tmp_path):
         daemon.stop()
 
 
+def test_link_endpoint_swaps_brain_token_for_local(tmp_home):
+    """BLE onboarding: POST /api/v1/link {token: <brain session>} returns
+    the node local_token only when the account owns this device."""
+    daemon = _daemon(tmp_home, 5991)
+    daemon.config.set("brain_url", "http://127.0.0.1:5992")
+    daemon.start()
+    try:
+        device_id = str(daemon.device_id)
+
+        class _Brain(BaseHTTPRequestHandler):
+            def do_GET(self):
+                assert self.headers.get("Authorization") == "Bearer sess-tok"
+                body = {"devices": []} if self.path.endswith("empty") else {
+                    "devices": [{"id": device_id}]}
+                blob = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                self.wfile.write(blob)
+            def log_message(self, *a):
+                pass
+
+        brain = ThreadingHTTPServer(("127.0.0.1", 5992), _Brain)
+        threading.Thread(target=brain.serve_forever, daemon=True).start()
+        try:
+            # Owner → local token.
+            resp = _req(5991, "/api/v1/link", "", method="POST",
+                        body={"token": "sess-tok"})
+            out = json.loads(resp.read())
+            assert out["token"] == daemon.config.local_token
+            assert out["device_id"] == device_id
+            # Missing token → 422.
+            try:
+                _req(5991, "/api/v1/link", "", method="POST", body={})
+                assert False, "expected 422"
+            except urllib.error.HTTPError as e:
+                assert e.code == 422
+        finally:
+            brain.shutdown()
+
+        # Non-owner → 403: stub a Brain that lists someone else's device.
+        class _Brain2(BaseHTTPRequestHandler):
+            def do_GET(self):
+                blob = json.dumps({"devices": [{"id": "other-node"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                self.wfile.write(blob)
+            def log_message(self, *a):
+                pass
+
+        brain2 = ThreadingHTTPServer(("127.0.0.1", 5993), _Brain2)
+        threading.Thread(target=brain2.serve_forever, daemon=True).start()
+        daemon.config.set("brain_url", "http://127.0.0.1:5993")
+        try:
+            _req(5991, "/api/v1/link", "", method="POST",
+                 body={"token": "sess-tok"})
+            assert False, "expected 403"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+        finally:
+            brain2.shutdown()
+    finally:
+        daemon.stop()
+
+
 def test_event_frame_falls_back_to_rest(tmp_home):
     # Tiny Brain stub capturing POST /v1/events.
     hits = []

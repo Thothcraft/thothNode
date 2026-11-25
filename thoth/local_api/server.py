@@ -563,6 +563,38 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(
                         403, {"error": "account does not own this node"})
             return self._json(200, {"token": self.server.token})  # type: ignore[attr-defined]
+        if path == "/api/v1/link":
+            # Seamless onboarding: the app presents its Brain session token
+            # (Firebase-authenticated /v1 bearer); the node checks device
+            # ownership and returns the local token — no password entry.
+            body = self._body()
+            bearer = str(body.get("token") or "").strip()
+            if not bearer:
+                return self._json(422, {"error": "token required"})
+            cfg = getattr(self.daemon, "config", None)
+            brain = (getattr(cfg, "brain_url", None)
+                     or "https://api.thothcraft.com").rstrip("/")
+            device_id = str(getattr(self.daemon, "device_id", "") or "")
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(
+                    f"{brain}/v1/devices",
+                    headers={"Authorization": f"Bearer {bearer}"})
+                with _ur.urlopen(req, timeout=15) as resp:
+                    devices = (json.loads(resp.read() or b"{}")
+                               .get("devices") or [])
+                owned = (not device_id) or any(
+                    isinstance(d, dict) and device_id in (
+                        str(d.get("id") or ""),
+                        str(d.get("stable_uuid") or ""))
+                    for d in devices)
+            except Exception:
+                return self._json(502, {"error": "link service unavailable"})
+            if not owned:
+                return self._json(
+                    403, {"error": "account does not own this node"})
+            return self._json(200, {"token": self.server.token,  # type: ignore[attr-defined]
+                                    "device_id": device_id})
         if path == "/inference":
             # whisper.cpp-compatible STT — the app's localWhisper provider
             # posts multipart ``file`` here; auth via Bearer or ?token=
