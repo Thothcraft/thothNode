@@ -134,6 +134,7 @@ class BluetoothSubsystem:
         try:
             loop.create_task(self._observer_task())
             loop.create_task(self._sweep_task())
+            loop.create_task(self._peripheral_task())
             loop.run_forever()
         except Exception as exc:
             logger.debug("ble loop exited: %s", exc)
@@ -326,6 +327,47 @@ class BluetoothSubsystem:
             sequence=dev["seq"],
             timestamp=now)
 
+    # -- peripheral role ------------------------------------------------------------
+
+    async def _peripheral_task(self) -> None:
+        """Host the commissioning GATT service + presence advertisement so
+        the phone app discovers this node as 'room*' over BLE. Runs on the
+        BLE asyncio loop; import-guarded dbus_next decides availability."""
+        if not self._conf("ble.peripheral_enabled", True):
+            return
+        try:
+            if not self._backend.peripheral_supported():
+                return
+        except Exception:
+            return
+        try:
+            from .gatt import GattApplication
+            name = str(self._conf(
+                "ble.local_name",
+                self._conf("device_name", "room1")))
+            app = GattApplication(
+                name=name,
+                device_id=self._device_id,
+                on_configure=lambda p: logger.info(
+                    "ble commissioning payload received: %s",
+                    sorted(p.keys()) if isinstance(p, dict) else "?"),
+                on_scan=lambda: self.seen_now(),
+                get_status=lambda: {
+                    "state": "ready", "device_id": self._device_id,
+                    "source_id": self.source_id,
+                },
+                # Presence marker the phone app's discoverer matches.
+                extra_service_uuids=[
+                    "7a68c2d0-5f3b-4e7a-9d2c-1b3a5f7e9d01"],
+            )
+            await app.register(adapter=self._adapter or "hci0")
+            self._peripheral_up = True
+            await asyncio.Event().wait()  # stay registered forever
+        except Exception as exc:
+            logger.info("ble peripheral role unavailable: %s", exc)
+
+    _peripheral_up = False
+
     # -- central role ---------------------------------------------------------------
     def central_connect(self, address: str,
                         subscriptions: Optional[Dict[str, Callable]] = None,
@@ -477,7 +519,8 @@ class BluetoothSubsystem:
                            if self.present else None),
             "source_id": self.source_id,
             "roles": {"observer": self.present, "central": self.present,
-                      "peripheral": peripheral},
+                      "peripheral": peripheral,
+                      "peripheral_up": self._peripheral_up},
             "scanning": self._scanning,
             "scan_error": self._scan_error,
             "known_devices": known_n,

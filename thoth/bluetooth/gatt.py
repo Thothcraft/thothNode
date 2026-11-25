@@ -65,13 +65,15 @@ class GattApplication:
     def __init__(self, name: str, device_id: str,
                  on_configure: Callable[[Dict[str, Any]], None],
                  on_scan: Optional[Callable[[], List[Dict[str, Any]]]] = None,
-                 get_status: Optional[Callable[[], Dict[str, Any]]] = None):
+                 get_status: Optional[Callable[[], Dict[str, Any]]] = None,
+                 extra_service_uuids: Optional[List[str]] = None):
         _require_dbus_next()
         self.name = name
         self.device_id = device_id
         self.on_configure = on_configure
         self.on_scan = on_scan
         self.get_status = get_status or (lambda: {"state": "idle"})
+        self.extra_service_uuids = list(extra_service_uuids or [])
         self._bus = None
         self._status_char = None
         self._adv_path = "/org/thoth/prov/adv"
@@ -225,7 +227,8 @@ class GattApplication:
             }},
             self._adv_path: {LE_ADVERTISEMENT: {
                 "Type": Variant("s", "peripheral"),
-                "ServiceUUIDs": Variant("as", [SVC_UUID]),
+                "ServiceUUIDs": Variant(
+                    "as", [SVC_UUID, *self.extra_service_uuids]),
                 "LocalName": Variant("s", self.name),
                 "Includes": Variant("as", ["tx-power"]),
             }},
