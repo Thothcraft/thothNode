@@ -102,6 +102,7 @@ class BluetoothSubsystem:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._started = False
+        self._tasks: list = []
 
     # -- config -----------------------------------------------------------------
     def _conf(self, key: str, default: Any) -> Any:
@@ -149,9 +150,14 @@ class BluetoothSubsystem:
         asyncio.set_event_loop(loop)
         self._loop = loop
         try:
-            loop.create_task(self._observer_task())
-            loop.create_task(self._sweep_task())
-            loop.create_task(self._peripheral_task())
+            # Keep references — an unreferenced Task is GC'd mid-run
+            # ("Task was destroyed but it is pending") and the peripheral
+            # advert silently dies ~30s in.
+            self._tasks = [
+                loop.create_task(self._observer_task()),
+                loop.create_task(self._sweep_task()),
+                loop.create_task(self._peripheral_task()),
+            ]
             loop.run_forever()
         except Exception as exc:
             logger.debug("ble loop exited: %s", exc)

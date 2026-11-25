@@ -284,6 +284,21 @@ class GattApplication:
 
         introspect = await bus.introspect(BLUEZ, f"/org/bluez/{adapter}")
         del introspect  # adapter must exist — failure surfaces below
+        # A registered advert only broadcasts while the adapter is
+        # discoverable; set it permanently (timeout 0) so the node is
+        # always findable for onboarding.
+        for prop, sig, val in (("Powered", "b", True),
+                               ("Discoverable", "b", True),
+                               ("DiscoverableTimeout", "u", 0)):
+            try:
+                await bus.call(Message(
+                    destination=BLUEZ, path=f"/org/bluez/{adapter}",
+                    interface="org.freedesktop.DBus.Properties",
+                    member="Set", signature="ssv",
+                    body=["org.bluez.Adapter1", prop,
+                          Variant(sig, val)]))
+            except Exception as exc:
+                logger.debug("adapter %s=%s failed: %s", prop, val, exc)
         reply = await bus.call(
             __import__("dbus_next").Message(
                 destination=BLUEZ,
