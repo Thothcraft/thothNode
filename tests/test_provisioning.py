@@ -214,3 +214,47 @@ def test_scan_payload(tmp_home):
     nets = pm.scan_payload()
     assert nets == [{"ssid": "MyHomeNet", "signal": -40,
                      "security": "WPA2"}]
+
+
+class FakeBle:
+    """Minimal BluetoothSubsystem stand-in for the handler injection."""
+
+    def __init__(self):
+        self.handlers = {}
+        self.notifications = 0
+
+    def set_peripheral_handlers(self, **handlers):
+        self.handlers.update(handlers)
+
+    def notify_peripheral_status(self):
+        self.notifications += 1
+
+
+def test_gatt_handlers_injected_into_ble(tmp_home):
+    """The single always-on peripheral gets the provisioning surface —
+    a BLE credential write lands on the provision queue."""
+    ble = FakeBle()
+    wifi = FakeWifi()
+    cfg = ConfigStore()
+    pm = ProvisionManager(cfg, emit=lambda o: None, device_id="node1",
+                          wifi=wifi, ble=ble,
+                          path=tmp_home / "prov.json")
+    pm.start()
+    try:
+        h = ble.handlers
+        assert callable(h["on_configure"])
+        # BLE write {ssid,psk} → queued provision request
+        out = h["on_configure"]({"ssid": "MyHomeNet", "psk": "pw"})
+        assert out["accepted"] is True
+        # scan/status ride the same handlers
+        assert h["on_scan"]()[0]["ssid"] == "MyHomeNet"
+        assert h["get_status"]()["state"] in ("idle", "provisioning",
+                                             "online")
+        # join progress pushes status notifications
+        deadline = time.time() + 5.0
+        while time.time() < deadline and \
+                pm.status()["state"] != "online":
+            time.sleep(0.05)
+        assert ble.notifications >= 1
+    finally:
+        pm.stop()

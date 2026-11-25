@@ -182,6 +182,7 @@ class ProvisionManager:
         if not self.enabled:
             self._set_state("disabled")
             return self
+        self._install_gatt_handlers()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop,
                                         name="thoth-prov", daemon=True)
@@ -396,57 +397,41 @@ class ProvisionManager:
             logger.debug("net.link emit failed: %s", exc)
 
     # -- BLE GATT commissioning glue -------------------------------------------------
-    def _start_gatt(self) -> None:
-        """Register the commissioning service on the BLE peripheral role —
-        only when the node is unprovisioned and the role exists."""
-        if self._gatt is not None:
-            return
+    # The subsystem owns a single always-on GattApplication; this manager
+    # supplies its wifi handlers so a BLE credential write lands in the
+    # provisioning queue and status notifications push join progress.
+    def _install_gatt_handlers(self) -> None:
         ble = self._ble
-        loop = getattr(ble, "_loop", None) if ble is not None else None
-        if ble is None or loop is None or not ble.present:
+        if ble is None:
             return
         try:
-            import asyncio
-            from ..bluetooth.gatt import GattApplication
-            name = str(self._conf("device_name",
-                                  self._config.get("device_name", "thoth-node"))
-                       or "thoth-node")
-            app = GattApplication(
-                name=name, device_id=self._device_id,
+            ble.set_peripheral_handlers(
                 on_configure=lambda p: self.provision(
                     p.get("ssid", ""), p.get("psk", ""),
                     bool(p.get("hidden"))),
                 on_scan=self.scan_payload,
                 get_status=self.status_payload)
-            asyncio.run_coroutine_threadsafe(
-                app.register(ble._adapter or "hci0"), loop)
-            self._gatt = app
+            self._gatt = True    # handlers live — commissioning reachable
         except Exception as exc:
-            logger.debug("provisioning GATT not started: %s", exc)
+            logger.debug("provisioning GATT handlers not installed: %s",
+                         exc)
+
+    def _start_gatt(self) -> None:
+        # Peripheral advert is always-on — nothing conditional to start.
+        self._install_gatt_handlers()
 
     def _stop_gatt(self) -> None:
-        app, self._gatt = self._gatt, None
-        if app is None:
-            return
-        ble = self._ble
-        loop = getattr(ble, "_loop", None) if ble is not None else None
-        if loop is not None:
-            try:
-                import asyncio
-                asyncio.run_coroutine_threadsafe(app.unregister(), loop)
-            except Exception:
-                pass
+        # Stay discoverable once online — the app keeps finding room1 by
+        # BLE for reconnects, identity, and future moves to a new network.
+        pass
 
     def _notify_gatt(self) -> None:
-        app = self._gatt
-        if app is not None:
-            ble = self._ble
-            loop = getattr(ble, "_loop", None) if ble is not None else None
-            if loop is not None:
-                try:
-                    loop.call_soon_threadsafe(app.notify_status)
-                except Exception:
-                    pass
+        ble = self._ble
+        if ble is not None:
+            try:
+                ble.notify_peripheral_status()
+            except Exception:
+                pass
 
     # -- status --------------------------------------------------------------------
     def scan_payload(self) -> List[Dict[str, Any]]:

@@ -36,6 +36,7 @@ CHAR_CONFIGURE = "a0630101-01c4-4d1e-9b2f-0011778899aa"  # write: {ssid,psk}
 CHAR_STATUS = "a0630102-01c4-4d1e-9b2f-0011778899aa"    # read+notify: state
 CHAR_SCAN = "a0630103-01c4-4d1e-9b2f-0011778899aa"      # read: network list
 CHAR_DEVICE_ID = "a0630104-01c4-4d1e-9b2f-0011778899aa"  # read: device id
+CHAR_NODE_INFO = "a0630105-01c4-4d1e-9b2f-0011778899aa"  # read: {ip,port,...}
 
 
 def _require_dbus_next():
@@ -66,6 +67,7 @@ class GattApplication:
                  on_configure: Callable[[Dict[str, Any]], None],
                  on_scan: Optional[Callable[[], List[Dict[str, Any]]]] = None,
                  get_status: Optional[Callable[[], Dict[str, Any]]] = None,
+                 node_info: Optional[Callable[[], Dict[str, Any]]] = None,
                  extra_service_uuids: Optional[List[str]] = None):
         _require_dbus_next()
         self.name = name
@@ -73,6 +75,7 @@ class GattApplication:
         self.on_configure = on_configure
         self.on_scan = on_scan
         self.get_status = get_status or (lambda: {"state": "idle"})
+        self.node_info = node_info or (lambda: {"device_id": device_id})
         self.extra_service_uuids = list(extra_service_uuids or [])
         self._bus = None
         self._status_char = None
@@ -80,10 +83,11 @@ class GattApplication:
 
     # -- D-Bus objects ----------------------------------------------------------
     def _build(self):
-        from dbus_next.service import (ServiceInterface, dbus_property,
-                                       method, signal)
+        from dbus_next.service import (PropertyAccess, ServiceInterface,
+                                       dbus_property, method, signal)
         from dbus_next import Variant
 
+        read_only = {"access": PropertyAccess.READ}
         app = self
 
         class ObjectManagerImpl(ServiceInterface):
@@ -99,15 +103,15 @@ class GattApplication:
                 super().__init__(GATT_SERVICE)
                 self.path, self.uuid, self.primary = path, uuid, primary
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def UUID(self) -> "s":
                 return self.uuid
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def Primary(self) -> "b":
                 return self.primary
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def Includes(self) -> "ao":
                 return []
 
@@ -124,19 +128,19 @@ class GattApplication:
                 self._notify = notify
                 self._notifying = False
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def UUID(self) -> "s":
                 return self.uuid
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def Service(self) -> "o":
                 return self.service_path
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def Flags(self) -> "as":
                 return self._flags
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def NotifyAcquired(self) -> "b":
                 return self._notifying
 
@@ -169,19 +173,19 @@ class GattApplication:
             def __init__(self):
                 super().__init__(LE_ADVERTISEMENT)
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def Type(self) -> "s":
                 return "peripheral"
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def ServiceUUIDs(self) -> "as":
-                return [SVC_UUID]
+                return [SVC_UUID, *app.extra_service_uuids]
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def LocalName(self) -> "s":
                 return app.name
 
-            @dbus_property()
+            @dbus_property(**read_only)
             def Includes(self) -> "as":
                 return ["tx-power"]
 
@@ -215,6 +219,11 @@ class GattApplication:
             },
             f"{svc_path}/char3": {
                 "UUID": Variant("s", CHAR_DEVICE_ID),
+                "Service": Variant("o", svc_path),
+                "Flags": Variant("as", ["read"]),
+            },
+            f"{svc_path}/char4": {
+                "UUID": Variant("s", CHAR_NODE_INFO),
                 "Service": Variant("o", svc_path),
                 "Flags": Variant("as", ["read"]),
             },
@@ -268,6 +277,9 @@ class GattApplication:
         bus.export(f"{svc_path}/char3", self._char_cls(
             f"{svc_path}/char3", CHAR_DEVICE_ID, svc_path, ["read"],
             read_fn=lambda: self.device_id.encode()))
+        bus.export(f"{svc_path}/char4", self._char_cls(
+            f"{svc_path}/char4", CHAR_NODE_INFO, svc_path, ["read"],
+            read_fn=lambda: json.dumps(self.node_info()).encode()))
         bus.export(self._adv_path, self._adv_cls())
 
         introspect = await bus.introspect(BLUEZ, f"/org/bluez/{adapter}")
@@ -335,6 +347,6 @@ class GattApplication:
 
 
 __all__ = [
-    "CHAR_CONFIGURE", "CHAR_DEVICE_ID", "CHAR_SCAN", "CHAR_STATUS",
-    "GattApplication", "SVC_UUID",
+    "CHAR_CONFIGURE", "CHAR_DEVICE_ID", "CHAR_NODE_INFO", "CHAR_SCAN",
+    "CHAR_STATUS", "GattApplication", "SVC_UUID",
 ]

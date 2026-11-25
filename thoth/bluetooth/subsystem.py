@@ -37,6 +37,23 @@ def _norm_mac(address: str) -> str:
     return "".join(c for c in str(address).lower() if c in "0123456789abcdef")
 
 
+def _lan_ip() -> str:
+    """Primary LAN IPv4 — UDP-connect trick (no traffic is sent)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            return str(s.getsockname()[0])
+        finally:
+            s.close()
+    except Exception:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return ""
+
+
 class _CentralSession:
     """State for one managed central-role connection."""
 
@@ -329,10 +346,56 @@ class BluetoothSubsystem:
 
     # -- peripheral role ------------------------------------------------------------
 
+    # Handlers injected by the daemon/provisioning layer — resolved at call
+    # time so the always-on GATT surface can be registered before the
+    # provisioning manager exists, then gain real behaviour later.
+    _prov_handlers: Dict[str, Optional[Callable]] = {}
+
+    def set_peripheral_handlers(self, *, on_configure=None, on_scan=None,
+                                get_status=None, node_info=None) -> None:
+        """Install callbacks the GATT commissioning service invokes.
+
+        ``on_configure(payload)`` — Wi-Fi credentials write; ``on_scan()`` —
+        visible networks; ``get_status()`` — provisioning state JSON;
+        ``node_info()`` — {device_id, name, hostname, ip, port} for the
+        app's post-BLE HTTP handoff.
+        """
+        for key, fn in (("on_configure", on_configure), ("on_scan", on_scan),
+                        ("get_status", get_status), ("node_info", node_info)):
+            if fn is not None:
+                self._prov_handlers[key] = fn
+
+    def notify_peripheral_status(self) -> None:
+        """Push a status notification to any connected BLE central."""
+        app = self._gatt_app
+        loop = self._loop
+        if app is not None and loop is not None:
+            try:
+                loop.call_soon_threadsafe(app.notify_status)
+            except Exception:
+                pass
+
+    def _handler(self, key: str, default: Callable) -> Callable:
+        fn = self._prov_handlers.get(key)
+        return fn if callable(fn) else default
+
+    def _node_info_default(self) -> Dict[str, Any]:
+        return {
+            "device_id": self._device_id,
+            "name": str(self._conf(
+                "ble.local_name", self._conf("device_name", "room1"))),
+            "hostname": __import__("socket").gethostname(),
+            "ip": _lan_ip(),
+            "port": int(self._conf("local_port", 5000)),
+            "format": "thoth.node/v1",
+        }
+
     async def _peripheral_task(self) -> None:
         """Host the commissioning GATT service + presence advertisement so
         the phone app discovers this node as 'room*' over BLE. Runs on the
-        BLE asyncio loop; import-guarded dbus_next decides availability."""
+        BLE asyncio loop; import-guarded dbus_next decides availability.
+        Always-on: discovery works provisioned or not; the provisioning
+        manager supplies the wifi handlers once it starts."""
         if not self._conf("ble.peripheral_enabled", True):
             return
         try:
@@ -348,25 +411,33 @@ class BluetoothSubsystem:
             app = GattApplication(
                 name=name,
                 device_id=self._device_id,
-                on_configure=lambda p: logger.info(
-                    "ble commissioning payload received: %s",
-                    sorted(p.keys()) if isinstance(p, dict) else "?"),
-                on_scan=lambda: self.seen_now(),
-                get_status=lambda: {
+                on_configure=lambda p: self._handler(
+                    "on_configure",
+                    lambda pl: logger.info(
+                        "ble commissioning payload received: %s",
+                        sorted(pl.keys()) if isinstance(pl, dict)
+                        else "?"))(p),
+                on_scan=lambda: self._handler(
+                    "on_scan", self.seen_now)(),
+                get_status=lambda: self._handler("get_status", lambda: {
                     "state": "ready", "device_id": self._device_id,
                     "source_id": self.source_id,
-                },
+                })(),
+                node_info=lambda: self._handler(
+                    "node_info", self._node_info_default)(),
                 # Presence marker the phone app's discoverer matches.
                 extra_service_uuids=[
                     "7a68c2d0-5f3b-4e7a-9d2c-1b3a5f7e9d01"],
             )
             await app.register(adapter=self._adapter or "hci0")
+            self._gatt_app = app
             self._peripheral_up = True
             await asyncio.Event().wait()  # stay registered forever
         except Exception as exc:
             logger.info("ble peripheral role unavailable: %s", exc)
 
     _peripheral_up = False
+    _gatt_app = None
 
     # -- central role ---------------------------------------------------------------
     def central_connect(self, address: str,

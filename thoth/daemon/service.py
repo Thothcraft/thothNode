@@ -526,10 +526,28 @@ class ThothDaemon:
             self._ble = BluetoothSubsystem(
                 self.config, emit=self.emit_observation,
                 device_id=self.device_id).start()
+            # The app's BLE onboarding reads this to find the HTTP API
+            # without mDNS (Android can't resolve .local).
+            self._ble.set_peripheral_handlers(node_info=self._ble_node_info)
             self._attach_watches()
         except Exception as exc:
             logger.debug("bluetooth subsystem not started: %s", exc)
             self._ble = None
+
+    def _ble_node_info(self) -> Dict[str, Any]:
+        """BLE NODE_INFO characteristic — how to reach this node's API."""
+        import socket as _s
+        from ..bluetooth.subsystem import _lan_ip
+        from .. import __version__
+        return {
+            "device_id": self.device_id,
+            "name": str(self.config.device_name or "room1"),
+            "hostname": _s.gethostname(),
+            "ip": _lan_ip(),
+            "port": int(self.config.get("local_port", 5000)),
+            "version": __version__,
+            "format": "thoth.node/v1",
+        }
 
     def _start_provisioning(self) -> None:
         """Network bring-up: idle → provisioning → online/failed,
