@@ -179,7 +179,11 @@ class GattApplication:
 
             @dbus_property(**read_only)
             def ServiceUUIDs(self) -> "as":
-                return [SVC_UUID, *app.extra_service_uuids]
+                # A legacy LE advert has 31 bytes — one 128-bit UUID +
+                # flags + short local name fit, a second 128-bit UUID does
+                # not. The room marker lives in the GATT tree; discovery
+                # matches on LocalName ("room*").
+                return [SVC_UUID]
 
             @dbus_property(**read_only)
             def LocalName(self) -> "s":
@@ -236,8 +240,7 @@ class GattApplication:
             }},
             self._adv_path: {LE_ADVERTISEMENT: {
                 "Type": Variant("s", "peripheral"),
-                "ServiceUUIDs": Variant(
-                    "as", [SVC_UUID, *self.extra_service_uuids]),
+                "ServiceUUIDs": Variant("as", [SVC_UUID]),
                 "LocalName": Variant("s", self.name),
                 "Includes": Variant("as", ["tx-power"]),
             }},
@@ -318,7 +321,9 @@ class GattApplication:
                 signature="oa{sv}",
                 body=[self._adv_path, {}]))
         if reply.message_type.name == "ERROR":
-            logger.debug("RegisterAdvertisement failed: %s", reply.body)
+            logger.info("RegisterAdvertisement failed: %s", reply.body)
+            raise BackendUnavailable(
+                f"LEAdvertisingManager1: {reply.body}")
         logger.info("ble peripheral: commissioning service advertising")
 
     def _on_configure_write(self, raw: bytes) -> None:
