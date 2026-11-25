@@ -563,7 +563,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(
                         403, {"error": "account does not own this node"})
             return self._json(200, {"token": self.server.token})  # type: ignore[attr-defined]
-        if path == "/inference" or path == "/api/v1/inference":
+        if path == "/inference":
             # whisper.cpp-compatible STT — the app's localWhisper provider
             # posts multipart ``file`` here; auth via Bearer or ?token=
             # (app sends the node token as a URL param since STT clients
