@@ -43,6 +43,24 @@ _CONTENT_TYPES = {
 }
 
 
+def _device_listed(devices: list, device_id: str) -> bool:
+    """Is ``device_id`` present anywhere in a Brain /v1/devices payload?
+
+    Contract drift between Brain deploys moves the uuid across fields
+    (``id`` / ``stable_uuid`` / ``device_id`` / ``uuid``); match any
+    string value, case- and dash-insensitive, so an older API can't
+    wrongly refuse a rightful owner.
+    """
+    def _norm(v: object) -> str:
+        return str(v or "").strip().lower().replace("-", "")
+    want = _norm(device_id)
+    if not want:
+        return True
+    return any(
+        isinstance(d, dict) and want in {_norm(v) for v in d.values()}
+        for d in devices)
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "ThothLocal/0.1"
 
@@ -571,11 +589,7 @@ class _Handler(BaseHTTPRequestHandler):
                     with _ur.urlopen(req, timeout=15) as resp:
                         devices = (json.loads(resp.read() or b"{}")
                                    .get("devices") or [])
-                    owned = any(
-                        isinstance(d, dict) and device_id in (
-                            str(d.get("id") or ""),
-                            str(d.get("stable_uuid") or ""))
-                        for d in devices)
+                    owned = _device_listed(devices, device_id)
                 except Exception:
                     owned = False
                 if not owned:
@@ -602,11 +616,7 @@ class _Handler(BaseHTTPRequestHandler):
                 with _ur.urlopen(req, timeout=15) as resp:
                     devices = (json.loads(resp.read() or b"{}")
                                .get("devices") or [])
-                owned = (not device_id) or any(
-                    isinstance(d, dict) and device_id in (
-                        str(d.get("id") or ""),
-                        str(d.get("stable_uuid") or ""))
-                    for d in devices)
+                owned = _device_listed(devices, device_id)
             except Exception:
                 return self._json(502, {"error": "link service unavailable"})
             if not owned:
