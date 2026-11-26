@@ -263,6 +263,14 @@ class BluetoothSubsystem:
                 if not dev["seen"]:
                     dev["seen"] = True
                     dev["present_reported"] = False
+                # enrollment after first sighting — flag + stable subject
+                # land here, not at entry creation.
+                if not dev["enrolled"]:
+                    rec = self.known.get(ah)
+                    if rec is not None:
+                        dev["enrolled"] = True
+                        dev["subject"] = rec["device_id"]
+                        dev["kind"] = rec.get("kind", dev["kind"])
             # sighting = the presence edge — report enrolled devices
             # here so a slow sweep can never skip their first "seen"
             if dev["enrolled"] and not dev["present_reported"]:

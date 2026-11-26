@@ -420,7 +420,9 @@ class ThothDaemon:
                     continue
                 name = (d.get("name") or "").lower()
                 addr = d.get("address")
-                if not name or not addr:
+                # only real MACs — a ``device:ble:<hash>`` subject string
+                # would enroll a phantom record.
+                if not name or not addr or ":" not in addr:
                     continue
                 for key, kind in self._AUTO_KINDS:
                     if key in name:
@@ -726,8 +728,37 @@ class ThothDaemon:
         ble = self._ble
         if ble is None:
             return {"ok": False, "error": "bluetooth unavailable"}
+        # ``device:ble:<hash>`` subjects (a picker's anonymous id) resolve
+        # to the live MAC — enrolling the string itself is a dead record.
+        if address.startswith("device:ble:"):
+            suffix = address.split(":", 2)[-1]
+            for d in ble.seen_now():
+                if d["subject"] == address or \
+                        d["subject"].endswith(suffix):
+                    address = d.get("address") or address
+                    break
+            if address.startswith("device:ble:"):
+                return {"ok": False,
+                        "error": "device not currently visible — cannot "
+                                 "resolve it to an address"}
         from ..bluetooth import BluetoothSubsystem
         ah = BluetoothSubsystem.addr_hash(address, ble._salt())
+        # Idempotent: a re-enroll (or auto-enroll retry) returns the
+        # existing record — no duplicate device entities.
+        existing = ble.known.get(ah)
+        if existing is not None:
+            out_exist: Dict[str, Any] = {
+                "ok": True, "device_id": existing["device_id"],
+                "addr_hash": ah, "record": existing, "already": True}
+            if person:
+                p = self._find_or_create_person(person)
+                edge = self.entities.relate(
+                    p["id"], existing["device_id"], "wears")
+                out_exist["person_id"] = p["id"]
+                out_exist["relation"] = edge
+            if kind in ("watch", "earbuds"):
+                self._attach_watches()
+            return out_exist
         ent = self.entities.upsert(
             type="device", name=name,
             attributes={"ble": True, "kind": kind})
