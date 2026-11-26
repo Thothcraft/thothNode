@@ -637,6 +637,9 @@ class ThothDaemon:
     def drive_authorize(self, token_json: str) -> Dict[str, Any]:
         return self.drive.authorize(token_json)
 
+    def drive_authorize_code(self, code: str) -> Dict[str, Any]:
+        return self.drive.authorize_code(code)
+
     def drive_mount(self) -> Dict[str, Any]:
         return self.drive.mount()
 

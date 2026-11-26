@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 REMOTE = "gdrive"
 _MOUNT_FLAG = "thoth-integrations"
 
+# rclone's shared Google Drive OAuth client — the same credentials
+# `rclone authorize` uses, so an in-app consent flow produces a token
+# the rclone mount can refresh indefinitely. (Public by design, like
+# rclone itself; retiring during 2026 — move to a thothcraft-owned
+# client id before then.)
+_OAUTH_CLIENT_ID = "202264815644.apps.googleusercontent.com"
+_OAUTH_CLIENT_SECRET = "X4Z3ca8xfWDb1Voo-F9a7ZxJ"
+OAUTH_REDIRECT_URI = "http://127.0.0.1:53682/"
+
 
 def _default_mount(home: Path) -> Path:
     return home / "GoogleDrive"
@@ -54,7 +63,65 @@ class DriveManager:
     def _env(self) -> Dict[str, str]:
         env = dict(os.environ)
         env["RCLONE_CONFIG"] = str(self._conf_file)
+        # systemctl --user needs the user-bus env — absent inside a
+        # systemd service even when a user manager is running.
+        uid = getattr(os, "getuid", None)
+        if uid is None:
+            return env
+        runtime = Path(f"/run/user/{uid()}")
+        if runtime.is_dir():
+            env.setdefault("XDG_RUNTIME_DIR", str(runtime))
+            env.setdefault("DBUS_SESSION_BUS_ADDRESS",
+                           f"unix:path={runtime}/bus")
         return env
+
+    _UNIT = "thoth-drive.service"
+
+    def _unit_path(self) -> Path:
+        return (self._home / ".config" / "systemd" / "user" / self._UNIT)
+
+    def _write_unit(self) -> None:
+        """A dedicated user unit owns the mount. Spawning rclone as a
+        daemon child puts it in thoth.service's cgroup — systemd's
+        KillMode=control-group then slaughters it on every daemon
+        restart, leaving a dead mountpoint."""
+        rclone = self._rclone() or "rclone"
+        body = f"""[Unit]
+Description=Thoth Drive mount (rclone)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=RCLONE_CONFIG={self._conf_file}
+ExecStart={rclone} mount {REMOTE}: {self._mount} --vfs-cache-mode writes --dir-cache-time 30s --volname {_MOUNT_FLAG}
+ExecStop=/usr/bin/fusermount -u {self._mount}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+        path = self._unit_path()
+        if not path.is_file() or path.read_text() != body:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+            subprocess.run(["systemctl", "--user", "daemon-reload"],
+                           env=self._env(), capture_output=True, timeout=15)
+
+    def _systemd_mount(self) -> bool:
+        """Mount via the user unit; False when systemd isn't available."""
+        if not shutil.which("systemctl"):
+            return False
+        try:
+            self._write_unit()
+            subprocess.run(["systemctl", "--user", "start", self._UNIT],
+                           env=self._env(), capture_output=True, timeout=20,
+                           check=True)
+            return True
+        except Exception as exc:
+            logger.debug("systemd mount failed: %s", exc)
+            return False
 
     def _run(self, *args: str, timeout: float = 30.0) -> str:
         out = subprocess.run(
@@ -139,6 +206,37 @@ class DriveManager:
             return {"ok": False, "error": f"config create failed: {exc}"}
         return self.mount()
 
+    def authorize_code(self, code: str) -> Dict[str, Any]:
+        """Exchange a Google auth code — captured by the app's in-app
+        consent WebView, which redirects to the loopback URI — for the
+        full token blob, then configure + mount. Keeps the client
+        secret server-side; clients only ever forward the code."""
+        if self._rclone() is None:
+            return {"ok": False, "error": "rclone not installed",
+                    "install_hint": "curl https://rclone.org/install.sh | sudo bash"}
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=urllib.parse.urlencode({
+                "code": code,
+                "client_id": _OAUTH_CLIENT_ID,
+                "client_secret": _OAUTH_CLIENT_SECRET,
+                "redirect_uri": OAUTH_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            }).encode())
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                blob = resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode()[:200]
+            return {"ok": False, "error":
+                    f"code exchange failed ({exc.code}): {detail}"}
+        except Exception as exc:
+            return {"ok": False, "error": f"code exchange failed: {exc}"}
+        return self.authorize(blob)
+
     def mount(self) -> Dict[str, Any]:
         if self._rclone() is None:
             return {"ok": False, "error": "rclone not installed"}
@@ -147,17 +245,18 @@ class DriveManager:
         if self._mounted():
             return {"ok": True, "already": True, **self._brief()}
         self._mount.mkdir(parents=True, exist_ok=True)
-        try:
-            subprocess.Popen(
-                [self._rclone() or "rclone", "mount", f"{REMOTE}:",
-                 str(self._mount), "--vfs-cache-mode", "writes",
-                 "--dir-cache-time", "30s",
-                 "--volname", _MOUNT_FLAG],
-                env=self._env(),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
-        except Exception as exc:
-            return {"ok": False, "error": f"mount failed: {exc}"}
+        if not self._systemd_mount():
+            try:
+                subprocess.Popen(
+                    [self._rclone() or "rclone", "mount", f"{REMOTE}:",
+                     str(self._mount), "--vfs-cache-mode", "writes",
+                     "--dir-cache-time", "30s",
+                     "--volname", _MOUNT_FLAG],
+                    env=self._env(),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+            except Exception as exc:
+                return {"ok": False, "error": f"mount failed: {exc}"}
         import time
         for _ in range(20):
             if self._mounted():
@@ -168,6 +267,13 @@ class DriveManager:
                 "error": "mount did not come up — check the Drive token"}
 
     def unmount(self) -> Dict[str, Any]:
+        if shutil.which("systemctl"):
+            try:
+                subprocess.run(["systemctl", "--user", "stop", self._UNIT],
+                               env=self._env(), capture_output=True,
+                               timeout=20)
+            except Exception:
+                pass
         try:
             subprocess.run(["fusermount", "-u", str(self._mount)],
                            capture_output=True, timeout=15)

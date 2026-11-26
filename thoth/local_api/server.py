@@ -835,6 +835,11 @@ class _Handler(BaseHTTPRequestHandler):
             if not token:
                 return self._json(400, {"error": "token required"})
             return self._json(200, d.drive_authorize(token))
+        if path == "/api/v1/integrations/drive/code":
+            code = str(body.get("code") or "").strip()
+            if not code:
+                return self._json(400, {"error": "code required"})
+            return self._json(200, d.drive_authorize_code(code))
         if path == "/api/v1/integrations/drive/mount":
             return self._json(200, d.drive_mount())
         if path == "/api/v1/integrations/drive/unmount":
