@@ -62,7 +62,8 @@ _HISTORY_MAX = 100
 
 def _default_memory() -> Dict[str, Any]:
     return {"facts": {}, "people": {}, "preferences": {},
-            "summary": "", "history": [], "settings": dict(_DEFAULT_SETTINGS)}
+            "goals": [], "summary": "", "history": [],
+            "settings": dict(_DEFAULT_SETTINGS)}
 
 
 class Assistant:
@@ -112,6 +113,15 @@ class Assistant:
                             mem[k][key] = val
             if isinstance(patch.get("summary"), str):
                 mem["summary"] = patch["summary"]
+            if isinstance(patch.get("goals"), list):
+                # [{text, done?, ts?}] — replace the whole list; reflect
+                # and app edits converge on this shape.
+                mem["goals"] = [
+                    {"text": str(g.get("text") or ""),
+                     "done": bool(g.get("done")),
+                     "ts": float(g.get("ts") or time.time())}
+                    for g in patch["goals"] if isinstance(g, dict)
+                    and g.get("text")][:50]
             if isinstance(patch.get("settings"), dict):
                 self._merge_settings(mem, patch["settings"])
             self._save(mem)
@@ -166,6 +176,12 @@ class Assistant:
         if mem.get("people"):
             parts.append("People: " + "; ".join(
                 f"{k} — {v}" for k, v in list(mem["people"].items())[:20]))
+        goals = [g for g in (mem.get("goals") or [])
+                 if isinstance(g, dict) and g.get("text")]
+        if goals:
+            parts.append("User goals: " + "; ".join(
+                f"{'[done] ' if g.get('done') else ''}{g['text']}"
+                for g in goals[:20]))
         tl = self._timeline_text(mem)
         if tl:
             parts.append(tl)
@@ -216,10 +232,12 @@ class Assistant:
             f"USER: {user_text}\nASSISTANT: {reply}\n\n"
             "Current memory:\n" + json.dumps(
                 {"facts": mem["facts"], "people": mem["people"],
-                 "preferences": mem["preferences"], "summary": mem["summary"]},
+                 "preferences": mem["preferences"], "goals": mem["goals"],
+                 "summary": mem["summary"]},
                 ensure_ascii=False) + "\n\n"
             'Reply with ONLY a JSON object: {"facts": {"k": "v or null to '
-            'delete"}, "people": {}, "preferences": {}, "summary": '
+            'delete"}, "people": {}, "preferences": {}, "goals": '
+            '[{"text": "...", "done": true}], "summary": '
             '"<=40 words"} — include only keys that changed; {} is fine.')
         out = self._ai.chat(
             [{"role": "system", "content": "You output JSON only."},
