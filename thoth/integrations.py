@@ -204,6 +204,10 @@ WantedBy=default.target
                       "--non-interactive", timeout=30.0)
         except Exception as exc:
             return {"ok": False, "error": f"config create failed: {exc}"}
+        # A live mount keeps the token it started with — bounce it so a
+        # re-auth (e.g. different Google account) takes effect now.
+        if self._mounted():
+            self.unmount()
         return self.mount()
 
     def authorize_code(self, code: str) -> Dict[str, Any]:
