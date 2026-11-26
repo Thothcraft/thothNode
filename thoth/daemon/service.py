@@ -426,7 +426,9 @@ class ThothDaemon:
                     if key in name:
                         try:
                             self.ble_enroll(
-                                addr, kind=kind, name=d.get("name"))
+                                addr, kind=kind,
+                                name="thothBuds" if kind == "earbuds"
+                                else d.get("name"))
                             logger.info("auto-enrolled %s as %s",
                                         d.get("name"), kind)
                         except Exception as exc:

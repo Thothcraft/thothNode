@@ -37,6 +37,13 @@ CHAR_STATUS = "a0630202" + _BASE     # READ + NOTIFY
 CHAR_EVENT = "a0630203" + _BASE      # NOTIFY
 CHAR_CONTROL = "a0630204" + _BASE    # WRITE
 
+# opb_config service (separate from thoth.wear): DEVICE_NAME char takes
+# ≤32B UTF-8, persists to NV storage, and TWS-syncs to the peer bud —
+# writes "thothBuds" on first attach so the pair rebrands without a
+# reflash (advert name follows on the next boot).
+CHAR_DEV_NAME = "0000ffc4-0000-1000-8000-00805f9b34fb"
+BUDS_NAME = "thothBuds"
+
 PROTO = 1
 
 # INFO.caps bits
@@ -217,6 +224,13 @@ class PinebudsLink:
             # lets a UART trace line up with Brain timestamps.
             self._ble.central_write(self.address, CHAR_CONTROL,
                                     encode_epoch())
+            # Rebrand live: nv-persisted name overrides the factory
+            # default on the next boot (and TWS-syncs to the peer).
+            try:
+                self._ble.central_write(self.address, CHAR_DEV_NAME,
+                                        BUDS_NAME.encode())
+            except Exception as exc:
+                logger.debug("earbuds rename write failed: %s", exc)
         else:
             self._last_event_seq = None
 
