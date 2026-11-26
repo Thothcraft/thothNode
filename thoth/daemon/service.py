@@ -399,6 +399,43 @@ class ThothDaemon:
         threading.Thread(target=_go, name="thoth-cal-upload",
                          daemon=True).start()
 
+    # Advertised names that auto-enroll — powered-on thoth wearables onboard
+    # with zero app action (the observer already sees every advert).
+    _AUTO_KINDS = (
+        ("infinitime", "watch"), ("pinetime", "watch"),
+        ("thothwatch", "watch"), ("thoth watch", "watch"),
+        ("pinebuds", "earbuds"), ("openpinebuds", "earbuds"),
+        ("thothbuds", "earbuds"), ("thoth.wear", "earbuds"),
+    )
+
+    def _auto_enroll_nearby(self) -> None:
+        """Enroll devices advertising known thoth names so they onboard
+        like room1 does for the phone — powered on means connected."""
+        ble = self._ble
+        if ble is None:
+            return
+        try:
+            for d in ble.seen_now():
+                if d.get("enrolled"):
+                    continue
+                name = (d.get("name") or "").lower()
+                addr = d.get("address")
+                if not name or not addr:
+                    continue
+                for key, kind in self._AUTO_KINDS:
+                    if key in name:
+                        try:
+                            self.ble_enroll(
+                                addr, kind=kind, name=d.get("name"))
+                            logger.info("auto-enrolled %s as %s",
+                                        d.get("name"), kind)
+                        except Exception as exc:
+                            logger.debug("auto-enroll %s failed: %s",
+                                         addr, exc)
+                        break
+        except Exception:
+            pass
+
     def _attach_watches(self) -> None:
         """Central-role links to enrolled wearables — subscribe to
         motion, push context back. Retried from ``_tick`` while the
@@ -1089,6 +1126,7 @@ class ThothDaemon:
         # estimator decay — silent sources produce no new observations
         for state in self.estimators.tick():
             self._emit_state(state)
+        self._auto_enroll_nearby()
         self._attach_watches()
         if self._sync is None:
             # No streams: still drive time/schedule triggers (no features).
