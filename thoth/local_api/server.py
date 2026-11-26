@@ -236,6 +236,16 @@ class _Handler(BaseHTTPRequestHandler):
                 return self.wfile.write(data)
             from .dashboard import PAGE   # dist absent → legacy page
             return self._html(200, PAGE, set_cookie=self._token_qs_ok(qs))
+        # Unauthenticated identity probe — LAN discovery (desktop/phone)
+        # answers "is this host a thoth node?" before any token exists.
+        # device_id/name are already broadcast in the BLE advert.
+        if path == "/api/v1/whoami":
+            d = self.daemon
+            return self._json(200, {
+                "device_id": d.device_id if d else None,
+                "name": getattr(d.config, "device_name", None) if d else None,
+                "service": "thoth",
+            })
         if serve_ui and path.startswith("/assets/"):
             return self._static(path)
         if path.startswith("/api/captures/") and path.endswith("/download") \
