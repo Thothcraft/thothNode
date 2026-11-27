@@ -732,6 +732,30 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200 if rec else 404,
                                 rec or {"error": "no such capture"})
         # -- canonical v1 surface (§12) ---------------------------------------
+        if path == "/api/v1/observations":
+            # Phone-forwarded observations (e.g. necklace IMU windows over
+            # BLE). Accepts one envelope or {observations: [...]}; each is
+            # validated against observation/v1 then fed to emit_observation
+            # so task models (imu.window.v1 → activity fusion) see them.
+            from ..observations import Observation, ObservationError
+            items = body.get("observations")
+            if not isinstance(items, list):
+                items = [body]
+            ids = []
+            for item in items:
+                if not isinstance(item, dict):
+                    return self._json(422, {"error": "observation must be an object"})
+                item = dict(item)
+                item.setdefault("source_id", "http:post")
+                try:
+                    obs = Observation.from_dict(item).validate()
+                except ObservationError as exc:
+                    return self._json(422, {"error": str(exc)})
+                ids.append(d.emit_observation(obs.to_dict()))
+            out = {"observation_ids": ids}
+            if len(ids) == 1:
+                out["observation_id"] = ids[0]
+            return self._json(201, out)
         if path == "/api/v1/inference":
             return self._json(200, d.infer(body))
         if path.startswith("/api/v1/actuators/") and path.endswith("/actions"):
