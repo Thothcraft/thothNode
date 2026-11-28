@@ -888,7 +888,8 @@ class _Handler(BaseHTTPRequestHandler):
             # {kind: room|activity, steps?} — guided calibration session.
             try:
                 return self._json(200, d.task_models.start_calibration(
-                    str(body.get("kind") or ""), steps=body.get("steps")))
+                    str(body.get("kind") or ""), steps=body.get("steps"),
+                    sources=body.get("sources")))
             except ValueError as exc:
                 return self._json(400, {"error": str(exc)})
         if path == "/api/v1/task-models/calibration/step":

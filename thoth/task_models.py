@@ -736,9 +736,11 @@ class TaskModelHub:
         if not s:
             return {"active": False, "calibration": {k: v for k, v in self.cal.items() if k != "background"}}
         return {"active": True, "kind": s["kind"], "id": s["id"], "steps": s["steps"],
-                "current": s.get("current"), "counts": {k: len(v) for k, v in s["data"].items()}}
+                "current": s.get("current"), "counts": {k: len(v) for k, v in s["data"].items()},
+                "sources": s.get("sources")}
 
-    def start_calibration(self, kind: str, steps: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def start_calibration(self, kind: str, steps: Optional[List[Dict[str, Any]]] = None,
+                          sources: Optional[List[str]] = None) -> Dict[str, Any]:
         if kind not in ("room", "activity"):
             raise ValueError("kind must be 'room' or 'activity'")
         catalog = ROOM_STEPS if kind == "room" else ACTIVITY_STEPS
@@ -749,11 +751,20 @@ class TaskModelHub:
             if unknown:
                 raise ValueError(f"unknown calibration steps: {unknown}")
             steps = [dict(by_label[s], optional=False) for s in steps]
+        # Per-device calibration: restrict the session to samples from the
+        # listed subjects (watch / necklace / wrist) so each wearable's IMU
+        # can be trained on its own or combined.
+        wanted = None
+        if sources:
+            wanted = {str(s).lower() for s in sources}
+            if not wanted:
+                wanted = None
         with self._lock:
             self._session = {"kind": kind, "id": f"cal-{int(time.time())}",
                              "steps": steps or catalog,
                              "current": None, "data": defaultdict(list), "empty_views": [],
-                             "started_at": time.time()}
+                             "started_at": time.time(),
+                             "sources": sorted(wanted) if wanted else None}
         return self.calibration_status()
 
     def step_calibration(self, label: str, action: str) -> Dict[str, Any]:
@@ -788,6 +799,8 @@ class TaskModelHub:
     def _record_activity_sample(self, subject: str, f: Dict[str, float], now: float) -> None:
         s = self._session
         if not s or s["kind"] != "activity" or not s.get("current"):
+            return
+        if s.get("sources") and subject.lower() not in s["sources"]:
             return
         s["data"][s["current"]].append({"subject": subject, "f": f, "ts": now})
 
@@ -866,7 +879,10 @@ class TaskModelHub:
                 if st.get("posture") == "standing" and st.get("activity") == "still":
                     upright[r["subject"]].append([r["f"]["gx"], r["f"]["gy"], r["f"]["gz"]])
         report: Dict[str, Any] = {"kind": "activity", "id": s["id"],
-                                  "samples": {k: len(v) for k, v in s["data"].items()}}
+                                  "samples": {k: len(v) for k, v in s["data"].items()},
+                                  "subjects": sorted({r["subject"] for rows in s["data"].values()
+                                                      for r in rows}),
+                                  "sources": s.get("sources")}
         if upright:
             self.cal.setdefault("upright", {}).update(
                 {subj: np.mean(v, axis=0).round(4).tolist() for subj, v in upright.items()})
