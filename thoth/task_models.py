@@ -251,6 +251,9 @@ class TaskModelHub:
         if self.cal.get("background"):
             self.snr.background = np.asarray(self.cal["background"], dtype=np.float32)
         self._frames: Deque[Tuple[float, Dict[str, Tuple[float, int]]]] = deque(maxlen=50)
+        # 1 Hz decimated SNR history for the home timeline graph — ~2 h.
+        self._history: Deque[Dict[str, Any]] = deque(maxlen=7200)
+        self._history_last_ts = 0.0
         self._imu: Dict[str, Deque[Tuple[float, Dict[str, float]]]] = defaultdict(lambda: deque(maxlen=16))
         self._zone_clf = self._load_model("zone_clf")
         self._har_gbm = self._load_model("har_gbm")
@@ -387,6 +390,10 @@ class TaskModelHub:
             sc = self.snr.scores(views[1], learn=self._presence_label_hint() != "occupied")
             if sc is not None:
                 self._frames.append((float(s.timestamp), sc))
+                if s.timestamp - self._history_last_ts >= 1.0:
+                    self._history_last_ts = float(s.timestamp)
+                    self._history.append({"ts": float(s.timestamp), **{
+                        d: round(sc[d][0], 2) for d in SECTORS}})
         energy = self._csi_energy(csi)
         feats = self._radar_summary(now)
         self._record_room_sample(feats, energy, now)
@@ -488,6 +495,16 @@ class TaskModelHub:
                 "sectors": sectors, "zones": zones, "r_th_m": r_th,
                 "presence": presence.get("label"), "zone": zone_pred.get("label"),
                 "active": dict(self.active)}
+
+    def sensing_history(self, window_s: float = 3600.0) -> Dict[str, Any]:
+        """Decimated per-sector SNR history for the home timeline graph:
+        ``{points: [{ts, L, M, R}], thresholds, r_th_m}``."""
+        window_s = max(60.0, min(float(window_s), 7200.0))
+        now = time.time()
+        pts = [p for p in self._history if now - p["ts"] <= window_s]
+        return {"ts": now, "window_s": window_s,
+                "points": pts, "thresholds": self._thresholds(),
+                "r_th_m": float(self.cal.get("r_th_m", self.snr.max_range_m / 2.0))}
 
     def _radar_summary(self, now: float) -> Optional[Dict[str, Any]]:
         frames = [f for t, f in self._frames if now - t <= 2.5][-10:]

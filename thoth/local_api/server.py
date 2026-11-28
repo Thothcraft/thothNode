@@ -399,6 +399,13 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/task-models/sensing":
             # Live per-direction signal + per-zone occupancy (6 sections).
             return self._json(200, d.task_models.sensing_snapshot())
+        if path == "/api/v1/task-models/sensing/history":
+            # Decimated per-sector SNR series for the home timeline graph.
+            try:
+                win = float(qs.get("window_s", ["3600"])[0])
+            except (TypeError, ValueError):
+                win = 3600.0
+            return self._json(200, d.task_models.sensing_history(win))
         if path == "/api/v1/tasks":
             return self._json(200, {"tasks": d.tasks.list(),
                                     "root": str(d.tasks.root())})
