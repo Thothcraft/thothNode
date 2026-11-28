@@ -454,6 +454,35 @@ class _Handler(BaseHTTPRequestHandler):
                                     else []})
         if path == "/api/v1/integrations/drive":
             return self._json(200, d.drive_status())
+        if path == "/api/v1/files/roots":
+            # Named sandboxed roots the Files page browses (shared, tasks,
+            # captures, the Drive mount when linked).
+            return self._json(200, {"roots": d.files.roots()})
+        if path == "/api/v1/files":
+            from ..files import describe_error
+            try:
+                return self._json(200, d.files.list(
+                    qs.get("root", ["shared"])[0], qs.get("path", [""])[0]))
+            except Exception as exc:
+                code, body = describe_error(exc)
+                return self._json(code, body)
+        if path == "/api/v1/files/read":
+            from ..files import describe_error
+            try:
+                target = d.files.read(
+                    qs.get("root", ["shared"])[0], qs.get("path", [""])[0])
+            except Exception as exc:
+                code, body = describe_error(exc)
+                return self._json(code, body)
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{target.name}"')
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path == "/api/v1/fs":
             target = (parse_qs(urlparse(self.path).query)
                       .get("path") or [""])[0]
@@ -868,6 +897,23 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, d.drive_mount())
         if path == "/api/v1/integrations/drive/unmount":
             return self._json(200, d.drive_unmount())
+        if path == "/api/v1/files/mkdir":
+            from ..files import describe_error
+            try:
+                return self._json(200, d.files.mkdir(
+                    str(body.get("root") or "shared"), str(body.get("path") or "")))
+            except Exception as exc:
+                code, err = describe_error(exc)
+                return self._json(code, err)
+        if path == "/api/v1/files/copy":
+            from ..files import describe_error
+            try:
+                return self._json(200, d.files.copy_within(
+                    str(body.get("root") or "shared"),
+                    str(body.get("from") or ""), str(body.get("to") or "")))
+            except Exception as exc:
+                code, err = describe_error(exc)
+                return self._json(code, err)
         if path == "/api/v1/esp32/net":
             # Wi-Fi creds destined for the attached ESP32(s), written
             # to their serial consoles — independent of whether the
@@ -1016,6 +1062,18 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         path = urlparse(self.path).path
+        if path == "/api/v1/files/write":
+            # Raw octet body → ?root=&path= inside the sandbox. Handled
+            # before _body() so the stream isn't consumed as JSON.
+            from ..files import describe_error
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                return self._json(200, self.daemon.files.write(
+                    qs.get("root", ["shared"])[0], qs.get("path", [""])[0],
+                    self._raw_body()))
+            except Exception as exc:
+                code, err = describe_error(exc)
+                return self._json(code, err)
         body = self._body()
         d = self.daemon
         if path == "/api/v1/metadata":
@@ -1070,6 +1128,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         d = self.daemon
+        if path == "/api/v1/files":
+            from ..files import describe_error
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                return self._json(200, d.files.delete(
+                    qs.get("root", ["shared"])[0], qs.get("path", [""])[0],
+                    recursive=qs.get("recursive", [""])[0] == "1"))
+            except Exception as exc:
+                code, err = describe_error(exc)
+                return self._json(code, err)
         if path.startswith("/api/automations/"):
             ok = d.automations.remove(path[len("/api/automations/"):])
             return self._json(200 if ok else 404, {"ok": ok})

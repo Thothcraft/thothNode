@@ -168,6 +168,10 @@ class ThothDaemon:
         # inside the mount so codex works on synced files.
         from ..integrations import DriveManager
         self.drive = DriveManager(self.config)
+        # Sandboxed browse/write file roots (shared, tasks, captures,
+        # Drive mount) for the app's Files page.
+        from ..files import FileHub
+        self.files = FileHub(self)
         # Local live transport — SSE fanout for the dashboard/SDK
         # (observations + prediction edges; never the uplink path).
         self.events = EventHub()
